@@ -182,6 +182,18 @@
       if(!silent) toast("上传失败：" + (e.message||e), "err");
     }
   }
+  // 从云端删除：删除操作必须传播到 Supabase，否则云端残留记录会在启动时自动拉取时被“复活”
+  async function deleteCloud(licenses, silent){
+    var c = getSb();
+    if(!c || !licenses || !licenses.length) return;
+    try{
+      var res = await c.from(state.settings.supabaseTable).delete().in("license", licenses);
+      if(res.error) throw res.error;
+      if(!silent) toast("已从云端删除 "+licenses.length+" 条", "ok");
+    }catch(e){
+      if(!silent) toast("云端删除失败：" + (e.message||e), "err");
+    }
+  }
   var syncTimer = null;
   function scheduleSync(){
     if(syncTimer) clearTimeout(syncTimer);
@@ -764,9 +776,13 @@
     var keys = Object.keys(state.selected).filter(function(k){ return state.selected[k]; });
     if(!keys.length){ toast("请先勾选要删除的记录", "warn"); return; }
     if(!confirm("确定删除选中的 "+keys.length+" 条记录？此操作不可撤销。")) return;
+    // 先收集要删除记录的许可证号，用于同步删除云端（否则云端残留会在刷新时被自动拉取复活）
+    var delLicenses = state.data.filter(function(r){ return state.selected[r._uid]; })
+                        .map(function(r){ return r.license; }).filter(Boolean);
     state.data = state.data.filter(function(r){ return !state.selected[r._uid]; });
     keys.forEach(function(k){ delete state.selected[k]; });
     saveData();
+    deleteCloud(delLicenses, true);
     renderLedger();
     if(state.view==="map") placeMarkers();
     toast("已删除 "+keys.length+" 条", "ok");
