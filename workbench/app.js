@@ -6,6 +6,7 @@
   "use strict";
 
   var LS_DATA = "hp_workbench_data_v2";
+  var LS_SYNCED = "hp_workbench_synced_v2";
   var LS_SETTINGS = "hp_workbench_settings";
   // 内置默认配置（开箱即用；如需清除请在「设置界面」留空并保存）
   var DEFAULT_SETTINGS = {
@@ -22,6 +23,7 @@
     view: "home",
     homeWindow: 30,
     selected: {},          // uid -> true
+    synced: {},           // license -> true：已知存在于云端的许可证号（用于区分“本地新增”与“别处已删除”）
     amap: null,
     geocoder: null,
     amapReady: false,
@@ -120,6 +122,7 @@
     if(raw){
       try{ state.data = JSON.parse(raw); }catch(e){ state.data = []; }
     }
+    try{ var s = localStorage.getItem(LS_SYNCED); state.synced = s ? JSON.parse(s) : {}; }catch(e){ state.synced = {}; }
     if(!state.data || !state.data.length){
       state.data = (window.SEED_DATA||[]).map(function(r){
         return Object.assign({}, r, { _uid: uid(), remark:(r.remark||"") });
@@ -129,7 +132,9 @@
       state.data.forEach(function(r){ if(!r._uid) r._uid = uid(); if(r.remark===undefined) r.remark=""; });
     }
   }
-  function saveDataLocal(){ localStorage.setItem(LS_DATA, JSON.stringify(state.data)); }
+  function saveSynced(){ try{ localStorage.setItem(LS_SYNCED, JSON.stringify(state.synced||{})); }catch(e){} }
+  function markAllSynced(){ state.data.forEach(function(r){ if(r.license) state.synced[r.license] = true; }); saveSynced(); }
+  function saveDataLocal(){ localStorage.setItem(LS_DATA, JSON.stringify(state.data)); saveSynced(); }
   function saveData(sync){
     saveDataLocal();
     if(sync !== false) scheduleSync();
@@ -172,18 +177,21 @@
           var rows2 = rows.map(function(r){ var x = Object.assign({}, r); delete x.remark; return x; });
           var res2 = await c.from(state.settings.supabaseTable).upsert(rows2, { onConflict:"license" });
           if(res2.error) throw res2.error;
+          markAllSynced();
           if(!silent) toast("已上传 "+rows2.length+" 条（备注列尚未创建，备注暂未同步）", "warn");
           return;
         }
         throw res.error;
       }
+      markAllSynced();
       if(!silent) toast("已上传 "+rows.length+" 条到云端", "ok");
     }catch(e){
       if(!silent) toast("上传失败：" + (e.message||e), "err");
     }
   }
   // 云端删除：从 Supabase units 表真正删除，使该记录在云端消失；
-  // 配合 pullCloud 的“云端为准”策略，其它设备拉取时会把本地已无云端的记录一并移除
+  // 配合 pullCloud 的 synced 标记策略：许可证号仍留在 state.synced 中，
+  // 其它设备拉取时发现“该 license 曾在云端、现云端已无”即把本地副本删除（删除跨设备传播）
   async function deleteCloud(licenses, silent){
     var c = getSb();
     if(!c || !licenses || !licenses.length) return;
@@ -214,11 +222,14 @@
       if(res.error) throw res.error;
       var rows = res.data || [];
       if(opts.merge === true){
-        // 合并模式：以云端为准。先把云端记录合并进本地（新增/修改），
-        // 再删除“本地有、但云端已无”的记录——这样在某设备上的删除会传播到其它设备
+        // 合并模式：以 synced 标记为据，区分“本地新增”与“别处已删除”
         var cloudLicenses = {};
         rows.forEach(function(d){ cloudLicenses[d.license] = true; });
-        state.data = state.data.filter(function(r){ return !r.license || cloudLicenses[r.license]; });
+        // 仅删除“曾在云端(state.synced)、但云端现已没有”的本地记录 = 其它设备的删除已传播；
+        // 从未推上云端的本地新增（不在 synced）不会被误删，刷新后保留
+        state.data = state.data.filter(function(r){
+          return !r.license || !state.synced[r.license] || cloudLicenses[r.license];
+        });
         var byLicense = {};
         state.data.forEach(function(r){ if(r.license) byLicense[r.license] = r; });
         rows.forEach(function(d){
@@ -232,12 +243,18 @@
             state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
               validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") });
           }
+          if(d.license) state.synced[d.license] = true;
         });
+        saveSynced();
       } else {
         state.data = rows.map(function(d){
           return { _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
             validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") };
         });
+        // 全量覆盖分支：云端即为真相，每条云端记录都标记为已同步
+        state.synced = {};
+        rows.forEach(function(d){ if(d.license) state.synced[d.license] = true; });
+        saveSynced();
       }
       saveDataLocal();
       renderCurrentView();
