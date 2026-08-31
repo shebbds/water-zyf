@@ -149,7 +149,8 @@
       return {
         license:r.license, id:r.id, name:r.name, address:r.address,
         valid_from:r.validFrom, valid_to:r.validTo, lng:r.lng, lat:r.lat,
-        remark:r.remark||""
+        remark:r.remark||"",
+        deleted: r.deleted ? 1 : 0
       };
     });
   }
@@ -182,14 +183,16 @@
       if(!silent) toast("上传失败：" + (e.message||e), "err");
     }
   }
-  // 从云端删除：删除操作必须传播到 Supabase，否则云端残留记录会在启动时自动拉取时被“复活”
+  // 云端软删除：用 deleted 标记而非硬删，这样其他设备拉取时能看到“该删了”并同步移除
+  // （硬删会导致某台设备本地副本无法被通知删除，多设备间删除无法传播）
   async function deleteCloud(licenses, silent){
     var c = getSb();
     if(!c || !licenses || !licenses.length) return;
     try{
-      var res = await c.from(state.settings.supabaseTable).delete().in("license", licenses);
+      var res = await c.from(state.settings.supabaseTable)
+        .update({deleted:true}).in("license", licenses);
       if(res.error) throw res.error;
-      if(!silent) toast("已从云端删除 "+licenses.length+" 条", "ok");
+      if(!silent) toast("已同步删除标记到云端 "+licenses.length+" 条", "ok");
     }catch(e){
       if(!silent) toast("云端删除失败：" + (e.message||e), "err");
     }
@@ -213,25 +216,32 @@
       if(res.error) throw res.error;
       var rows = res.data || [];
       if(opts.merge === true){
-        // 合并模式：云端优先，但保留本地独有记录，且坐标以“非空”为准，不丢本地已编码坐标
+        // 合并模式：云端优先；云端标记为删除的记录也要在本机删除，使删除在设备间传播
+        var cloudDeleted = {};
+        rows.forEach(function(d){ if(d.deleted) cloudDeleted[d.license] = true; });
+        if(Object.keys(cloudDeleted).length){
+          state.data = state.data.filter(function(r){ return !cloudDeleted[r.license]; });
+        }
         var byLicense = {};
         state.data.forEach(function(r){ if(r.license) byLicense[r.license] = r; });
         rows.forEach(function(d){
+          if(d.deleted) return;
           var base = byLicense[d.license];
           if(base){
             base.id = d.id; base.name = d.name; base.address = d.address;
             base.validFrom = d.valid_from; base.validTo = d.valid_to; base.remark = (d.remark||"");
+            base.deleted = false;
             if(d.lng != null) base.lng = d.lng;
             if(d.lat != null) base.lat = d.lat;
           } else {
             state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-              validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") });
+              validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||""), deleted:false });
           }
         });
       } else {
-        state.data = rows.map(function(d){
+        state.data = rows.filter(function(d){ return !d.deleted; }).map(function(d){
           return { _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-            validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") };
+            validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||""), deleted:false };
         });
       }
       saveDataLocal();
