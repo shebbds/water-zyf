@@ -1,11 +1,11 @@
 /* 卫生许可个人业务工作台 — 应用逻辑
- * 数据源：window.SEED_DATA（来自《和平里 常用底档材料.xlsx》）
+ * 数据源：window.SEED_DATA（来自《zyf test.xlsx》）
  * 所有页面共享同一套本地数据（localStorage），并可选同步到 Supabase。
  */
 (function(){
   "use strict";
 
-  var LS_DATA = "hp_workbench_data";
+  var LS_DATA = "hp_workbench_data_v2";
   var LS_SETTINGS = "hp_workbench_settings";
   // 内置默认配置（开箱即用；如需清除请在「设置界面」留空并保存）
   var DEFAULT_SETTINGS = {
