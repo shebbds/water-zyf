@@ -3,7 +3,7 @@
 # Render 会自动按此文件创建静态站点。也可在 Render 手动新建 Static Site，
 # 发布目录填 ./workbench 即可。
 services:
-  - name: water-cx-workbench
+  - name: water-zyf
     type: web                 # 静态站点与 Web 服务都用 web
     runtime: static           # 静态站点运行时
     buildCommand: "echo 'static site, no build needed'"

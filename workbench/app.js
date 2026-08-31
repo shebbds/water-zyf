@@ -11,8 +11,8 @@
   var DEFAULT_SETTINGS = {
     amapKey:"78b6849a32ebdb6c5db2371b3eb3a732",
     amapSecurity:"c930ea76af4fe01a9ab82e82ca85b3b2",
-    supabaseUrl:"https://uyjwfxpmbxlaeauijoro.supabase.co",
-    supabaseKey:"sb_publishable_8DbZw9ho5QHskTq46z_kOQ_PBAOe-u1",
+    supabaseUrl:"https://tchrevgamfaxjmjcqeww.supabase.co",
+    supabaseKey:"sb_publishable_WDg9H-OEl5ickKrRqQpcfQ_qVFk_oM1",
     supabaseTable:"units"
   };
 
