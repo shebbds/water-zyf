@@ -80,7 +80,9 @@
   tbody tr{cursor:pointer}
   tbody tr:hover{background:var(--soft)}
   td .addr{color:var(--muted);font-size:12px}
-  td .remark-cell{max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  td.remark-cell{max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  td.dev-cell{max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  th{white-space:nowrap}
   .tablewrap{max-height:62vh;overflow:auto;border:1px solid var(--line);border-radius:12px}
   .addgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
   .addgrid .fld input,.addgrid .fld select{width:100%}
@@ -229,7 +231,7 @@
       <div class="hd">
         <h2>单位台账（全部数据）</h2>
         <div class="toolbar">
-          <input type="text" id="ledger-search" placeholder="搜索：编号 / 单位 / 地址 / 许可证号">
+          <input type="text" id="ledger-search" placeholder="搜索：编号 / 单位 / 地址 / 设备 / 联系人 / 许可证号">
           <button class="btn" id="import-btn">导入 Excel / 表格</button>
           <input type="file" id="import-file" accept=".xlsx,.xls,.csv" style="display:none">
           <button class="btn danger" id="batch-delete" data-action="batch-delete">批量删除选中</button>
@@ -243,7 +245,7 @@
             <thead>
               <tr>
                 <th style="width:34px"><input type="checkbox" id="select-all" class="rowsel"></th>
-                <th>编号</th><th>单位名称</th><th>经营地址</th><th>备注</th><th>卫生许可证号</th>
+                <th>编号</th><th>单位名称</th><th>经营地址</th><th>设备类型</th><th>联系人</th><th>备注</th><th>卫生许可证号</th>
                 <th>有效期始</th><th>有效期止</th><th>坐标</th>
               </tr>
             </thead>

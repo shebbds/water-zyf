@@ -845,11 +845,11 @@
     var rows = state.data;
     if(q){
       rows = rows.filter(function(r){
-        return (r.id+" "+r.name+" "+r.address+" "+r.license).toLowerCase().indexOf(q) >= 0;
+        return (r.id+" "+r.name+" "+r.address+" "+(r.deviceType||"")+" "+(r.contact||"")+" "+r.license).toLowerCase().indexOf(q) >= 0;
       });
     }
     if(!rows.length){
-      body.innerHTML = '<tr><td colspan="8" class="empty">'+(q?"没有匹配「"+esc(state.ledgerQuery)+"」的单位":"暂无数据，请在上方手动新增或导入。")+'</td></tr>';
+      body.innerHTML = '<tr><td colspan="10" class="empty">'+(q?"没有匹配「"+esc(state.ledgerQuery)+"」的单位":"暂无数据，请在上方手动新增或导入。")+'</td></tr>';
     } else {
       body.innerHTML = rows.map(function(r){
         return '<tr data-action="detail" data-uid="'+r._uid+'">' +
@@ -857,7 +857,9 @@
           '<td>'+esc(r.id)+'</td>' +
           '<td>'+esc(r.name)+'</td>' +
           '<td class="addr">'+esc(r.address)+'</td>' +
-          '<td class="addr remark-cell" title="'+esc(r.remark||"")+'">'+esc(r.remark||"")+'</td>' +
+          '<td class="dev-cell" title="'+esc(r.deviceType||"")+'">'+esc(r.deviceType||"")+'</td>' +
+          '<td class="dev-cell" title="'+esc(r.contact||"")+'">'+esc(r.contact||"")+'</td>' +
+          '<td class="remark-cell" title="'+esc(r.remark||"")+'">'+esc(r.remark||"")+'</td>' +
           '<td>'+esc(r.license)+'</td>' +
           '<td>'+esc(r.validFrom)+'</td>' +
           '<td>'+esc(r.validTo)+'</td>' +
