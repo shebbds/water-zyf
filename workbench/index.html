@@ -212,6 +212,8 @@
           <label class="fld">卫生许可证号<input type="text" id="add-license" placeholder="唯一键"></label>
           <label class="fld">有效期始<input type="date" id="add-from"></label>
           <label class="fld">有效期止<input type="date" id="add-to"></label>
+          <label class="fld">设备类型<input type="text" id="add-device-type" placeholder="如 二次供水 / 直饮水"></label>
+          <label class="fld">联系人<input type="text" id="add-contact" placeholder="如 张三 13800138000"></label>
         </div>
         <label class="fld" style="margin-top:12px"><span>备注</span>
           <textarea id="add-remark" rows="2" placeholder="可选：补充说明（如联系人、特殊要求等）" style="width:100%;resize:vertical;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:9px"></textarea>
@@ -232,6 +234,7 @@
           <input type="file" id="import-file" accept=".xlsx,.xls,.csv" style="display:none">
           <button class="btn danger" id="batch-delete" data-action="batch-delete">批量删除选中</button>
           <button class="btn sm" id="export-btn">导出 JSON</button>
+          <button class="btn sm" id="export-sel-btn">导出所选 / 全部</button>
         </div>
       </div>
       <div class="bd">

@@ -128,11 +128,17 @@
     // 用户主动删空（LS_DATA = "[]"）时绝不能重置，否则永远删不干净。
     if(!raw){
       state.data = (window.SEED_DATA||[]).map(function(r){
-        return Object.assign({}, r, { _uid: uid(), remark:(r.remark||"") });
+        return Object.assign({}, r, { _uid: uid(), remark:(r.remark||""),
+          deviceType:(r.deviceType||""), contact:(r.contact||"") });
       });
       saveDataLocal();
     } else if(state.data && state.data.length){
-      state.data.forEach(function(r){ if(!r._uid) r._uid = uid(); if(r.remark===undefined) r.remark=""; });
+      state.data.forEach(function(r){
+        if(!r._uid) r._uid = uid();
+        if(r.remark===undefined) r.remark="";
+        if(r.deviceType===undefined) r.deviceType="";
+        if(r.contact===undefined) r.contact="";
+      });
     }
   }
   function saveSynced(){ try{ localStorage.setItem(LS_SYNCED, JSON.stringify(state.synced||{})); }catch(e){} }
@@ -157,16 +163,38 @@
       return {
         license:r.license, id:r.id, name:r.name, address:r.address,
         valid_from:r.validFrom, valid_to:r.validTo, lng:r.lng, lat:r.lat,
-        remark:r.remark||""
+        remark:r.remark||"", device_type:r.deviceType||"", contact:r.contact||""
       };
     });
   }
-  // 是否因“缺少 remark 列”报错（PostgREST 42703 / 含 remark 的 column does not exist）
-  function isRemarkColumnError(err){
-    if(!err) return false;
-    if(err.code === "42703") return true;
-    var m = (err.message||"") + " " + (err.hint||"");
-    return m.indexOf("remark") >= 0 && (m.indexOf("does not exist") >= 0 || m.indexOf("column") >= 0);
+  // 解析“云端不存在某列”的报错（PostgREST 42703），返回列名，如 remark / device_type / contact
+  function missingColumn(err){
+    if(!err) return null;
+    var m = String(err.message||"") + " " + String(err.hint||"");
+    var m1 = m.match(/column "([^"]+)" of relation/);        // column "remark" of relation "units" does not exist
+    if(m1) return m1[1];
+    var m2 = m.match(/Could not find the '([^']+)' column/); // Could not find the 'remark' column of 'units'...
+    if(m2) return m2[1];
+    return null;
+  }
+  // 上传行数据：云端缺少某些列时自动剔除该列并重试，保证其余字段仍能同步。
+  // 返回 { res, dropped }，dropped 为被剔除的列名（说明这些字段暂未同步到云端）。
+  async function upsertRows(rows){
+    var c = getSb();
+    var dropped = [], res = null;
+    for(var i=0; i<6; i++){
+      var payload = rows.map(function(r){
+        var x = Object.assign({}, r);
+        dropped.forEach(function(k){ delete x[k]; });
+        return x;
+      });
+      res = await c.from(state.settings.supabaseTable).upsert(payload, { onConflict:"license" });
+      if(!res.error) break;
+      var miss = missingColumn(res.error);
+      if(!miss || dropped.indexOf(miss) >= 0) break;
+      dropped.push(miss);
+    }
+    return { res: res, dropped: dropped };
   }
   // 静默自动同步（防抖触发）失败时也要让用户看见，否则“保存失败”会被完全吞掉，
   // 表现为“导入了、看着有，刷新就没了”却没有任何提示。同一条错误 60 秒内只提示一次。
@@ -186,21 +214,14 @@
     if(!c){ if(!silent) toast("请先在设置中配置 Supabase", "warn"); return; }
     try{
       var rows = toRows();
-      var res = await c.from(state.settings.supabaseTable).upsert(rows, { onConflict:"license" });
-      if(res.error){
-        // 若 units 表尚未创建 remark 列，去掉备注后重试，保证其余字段仍同步
-        if(isRemarkColumnError(res.error)){
-          var rows2 = rows.map(function(r){ var x = Object.assign({}, r); delete x.remark; return x; });
-          var res2 = await c.from(state.settings.supabaseTable).upsert(rows2, { onConflict:"license" });
-          if(res2.error) throw res2.error;
-          markAllSynced();
-          if(!silent) toast("已上传 "+rows2.length+" 条（备注列尚未创建，备注暂未同步）", "warn");
-          return;
-        }
-        throw res.error;
-      }
+      var out = await upsertRows(rows);
+      if(out.res.error) throw out.res.error;
       markAllSynced();
-      if(!silent) toast("已上传 "+rows.length+" 条到云端", "ok");
+      if(!silent){
+        toast("已上传 "+rows.length+" 条到云端" +
+              (out.dropped.length ? "（云端缺少列 "+out.dropped.join("、")+"，这些字段未同步）" : ""),
+              out.dropped.length ? "warn" : "ok");
+      }
     }catch(e){
       var m = e.message || String(e);
       if(!silent) toast("上传失败：" + m, "err");
@@ -243,15 +264,10 @@
     _aligning = true;
     try{
       var table = state.settings.supabaseTable;
-      // 1) 上传本地全部记录（覆盖新增与编辑）
+      // 1) 上传本地全部记录（覆盖新增与编辑）；云端缺列时自动剔除该列重试
       var rows = toRows();
-      var res = await c.from(table).upsert(rows, { onConflict:"license" });
-      if(res.error && isRemarkColumnError(res.error)){
-        // units 表尚无 remark 列时，去掉备注重试，保证其余字段仍同步
-        rows = rows.map(function(r){ var x = Object.assign({}, r); delete x.remark; return x; });
-        res = await c.from(table).upsert(rows, { onConflict:"license" });
-      }
-      if(res.error) throw res.error;
+      var out = await upsertRows(rows);
+      if(out.res.error) throw out.res.error;
       markAllSynced();
 
       // 2) 删除云端残留：本设备曾同步过(synced)、但本地现已没有的记录
@@ -266,8 +282,12 @@
         if(dd.error) throw dd.error;
       }
       if(!opts.silent){
+        var extra = [];
+        if(stale.length) extra.push("同步删除 " + stale.length + " 条");
+        if(out.dropped.length) extra.push("云端缺列 " + out.dropped.join("、"));
         toast("已与云端对齐：" + state.data.length + " 条" +
-              (stale.length ? ("，同步删除 " + stale.length + " 条") : ""), "ok");
+              (extra.length ? "（" + extra.join("；") + "）" : ""),
+              out.dropped.length ? "warn" : "ok");
       }
     }catch(e){
       var m = e.message || String(e);
@@ -368,12 +388,18 @@
           var base = byLicense[d.license];
           if(base){
             base.id = d.id; base.name = d.name; base.address = d.address;
-            base.validFrom = d.valid_from; base.validTo = d.valid_to; base.remark = (d.remark||"");
+            base.validFrom = d.valid_from; base.validTo = d.valid_to;
+            // 仅当云端确实有该列（值非 undefined）时才覆盖本地，
+            // 否则云端缺列会把本地已有的备注/设备类型/联系人清空
+            if(d.remark != null) base.remark = d.remark;
+            if(d.device_type != null) base.deviceType = d.device_type;
+            if(d.contact != null) base.contact = d.contact;
             if(d.lng != null) base.lng = d.lng;
             if(d.lat != null) base.lat = d.lat;
           } else {
             state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-              validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") });
+              validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat,
+              remark:(d.remark||""), deviceType:(d.device_type||""), contact:(d.contact||"") });
           }
           if(d.license) state.synced[d.license] = true;
         });
@@ -381,7 +407,8 @@
       } else {
         state.data = rows.map(function(d){
           return { _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
-            validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat, remark:(d.remark||"") };
+            validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat,
+            remark:(d.remark||""), deviceType:(d.device_type||""), contact:(d.contact||"") };
         });
         // 全量覆盖分支：云端即为真相，每条云端记录都标记为已同步
         state.synced = {};
@@ -681,6 +708,8 @@
         '<div class="kv"><span>卫生许可证号</span><b>'+esc(rec.license)+'</b></div>' +
         '<div class="kv"><span>有效期始</span><b>'+esc(rec.validFrom)+'</b></div>' +
         '<div class="kv"><span>有效期止</span><b>'+esc(rec.validTo)+' '+duHtml+'</b></div>' +
+        '<div class="kv"><span>设备类型</span><b>'+esc(rec.deviceType||"")+'</b></div>' +
+        '<div class="kv"><span>联系人</span><b>'+esc(rec.contact||"")+'</b></div>' +
         '<div class="kv"><span>坐标</span><b>'+esc(coordText(rec))+'</b></div>' +
         '<div class="kv"><span>备注</span><b class="remark-text">'+esc(rec.remark||"")+'</b></div>' +
         '<div class="actions">' +
@@ -705,6 +734,8 @@
           '<label class="fld">卫生许可证号<input type="text" id="e-license" value="'+esc(rec.license)+'"></label>' +
           '<label class="fld">有效期始<input type="date" id="e-from" value="'+esc(rec.validFrom)+'"></label>' +
           '<label class="fld">有效期止<input type="date" id="e-to" value="'+esc(rec.validTo)+'"></label>' +
+          '<label class="fld">设备类型<input type="text" id="e-device-type" value="'+esc(rec.deviceType||"")+'" placeholder="如 二次供水 / 直饮水"></label>' +
+          '<label class="fld">联系人<input type="text" id="e-contact" value="'+esc(rec.contact||"")+'" placeholder="如 张三 13800138000"></label>' +
         '</div>' +
         '<label class="fld" style="margin-top:12px"><span>备注</span>' +
           '<textarea id="e-remark" rows="3" style="width:100%;resize:vertical;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:9px">'+esc(rec.remark||"")+'</textarea>' +
@@ -724,6 +755,8 @@
       rec.validFrom = $("e-from").value;
       rec.validTo = $("e-to").value;
       rec.remark = $("e-remark").value;
+      rec.deviceType = $("e-device-type") ? $("e-device-type").value.trim() : (rec.deviceType||"");
+      rec.contact = $("e-contact") ? $("e-contact").value.trim() : (rec.contact||"");
       commit();          // 立即落盘 + 立即与云端对齐
       refreshIfMap();
       renderCurrentView();
@@ -855,6 +888,8 @@
       validFrom: $("add-from").value,
       validTo: $("add-to").value,
       remark: $("add-remark") ? $("add-remark").value.trim() : "",
+      deviceType: $("add-device-type") ? $("add-device-type").value.trim() : "",
+      contact: $("add-contact") ? $("add-contact").value.trim() : "",
       lng: null, lat: null
     };
     state.data.push(rec);
@@ -871,7 +906,9 @@
     toast("已添加单位：" + name, "ok");
   }
   function clearAddForm(){
-    ["add-id","add-name","add-address","add-license","add-from","add-to"].forEach(function(id){ $(id).value=""; });
+    ["add-id","add-name","add-address","add-license","add-from","add-to","add-device-type","add-contact"]
+      .forEach(function(id){ if($(id)) $(id).value=""; });
+    if($("add-remark")) $("add-remark").value="";
   }
 
   function importExcel(file){
@@ -892,12 +929,16 @@
           var vt = normExcelDate(row["有效期止"]);
           var id = String(row["编号"]||"").trim();
           var remark = String(row["备注"]||"").trim();
+          var deviceType = String(row["设备类型"]||row["设备类别"]||"").trim();
+          var contact = String(row["联系人"]||"").trim();
           var exist = state.data.find(function(r){ return r.license === lic; });
           if(exist){
-            // 存在相同许可证号 → 仅覆盖更新有效期始/止
+            // 存在相同许可证号 → 仅覆盖更新有效期始/止与补充信息
             if(vf) exist.validFrom = vf;
             if(vt) exist.validTo = vt;
             if(remark) exist.remark = remark;
+            if(deviceType) exist.deviceType = deviceType;
+            if(contact) exist.contact = contact;
             updated++;
             if(exist.address && (exist.lng==null || exist.lat==null)) toGeocode.push(exist);
           } else {
@@ -910,6 +951,8 @@
               validFrom: vf,
               validTo: vt,
               remark: remark,
+              deviceType: deviceType,
+              contact: contact,
               lng: null, lat: null
             };
             state.data.push(rec);
@@ -960,6 +1003,46 @@
     a.download = "卫生许可台账_导出.json";
     a.click();
     URL.revokeObjectURL(a.href);
+  }
+  // 把给定记录导出为 Excel（含设备类型/联系人）
+  function exportRowsToXlsx(list){
+    var rows = list.map(function(r){
+      return {
+        "编号": r.id || "",
+        "单位名称": r.name || "",
+        "经营地址": r.address || "",
+        "设备类型": r.deviceType || "",
+        "联系人": r.contact || "",
+        "卫生许可证号": r.license || "",
+        "有效期始": r.validFrom || "",
+        "有效期止": r.validTo || "",
+        "经度": (r.lng == null ? "" : r.lng),
+        "纬度": (r.lat == null ? "" : r.lat),
+        "备注": r.remark || ""
+      };
+    });
+    var ws = window.XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [{wch:8},{wch:28},{wch:30},{wch:14},{wch:16},{wch:22},{wch:12},{wch:12},{wch:12},{wch:12},{wch:24}];
+    var wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, "单位台账");
+    var d = new Date();
+    var stamp = d.getFullYear() + String(d.getMonth()+1).padStart(2,"0") + String(d.getDate()).padStart(2,"0");
+    window.XLSX.writeFile(wb, "单位台账_" + stamp + ".xlsx");
+    toast("已导出 " + rows.length + " 条到 Excel", "ok");
+  }
+  // 导出“所选”单位：勾了就导勾中的，没勾则询问是否导出全部
+  function exportSelected(){
+    var keys = Object.keys(state.selected).filter(function(k){ return state.selected[k]; });
+    var list;
+    if(keys.length){
+      list = state.data.filter(function(r){ return state.selected[r._uid]; });
+    } else {
+      if(!confirm("未勾选任何单位。是否导出全部 " + state.data.length + " 条？")) return;
+      list = state.data;
+    }
+    if(!list.length){ toast("没有可导出的单位", "warn"); return; }
+    if(!window.XLSX){ toast("表格组件未加载，请检查网络后重试", "err"); return; }
+    exportRowsToXlsx(list);
   }
 
   /* ---------------- 地图渲染 ---------------- */
@@ -1092,6 +1175,7 @@
     });
     $("batch-delete").addEventListener("click", batchDelete);
     $("export-btn").addEventListener("click", exportJson);
+    if($("export-sel-btn")) $("export-sel-btn").addEventListener("click", exportSelected);
     // 台账搜索
     $("ledger-search").addEventListener("input", function(){
       state.ledgerQuery = this.value;
