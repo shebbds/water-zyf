@@ -74,7 +74,9 @@
   .reminder .right{display:flex;align-items:center;gap:12px}
   .empty{padding:40px;text-align:center;color:var(--muted)}
   /* ledger table —— 表格设最小宽度，超出容器时 tablewrap 出现横向滚动条 */
-  table{min-width:1560px;width:100%;border-collapse:collapse;font-size:13px}
+  /* table-layout:fixed 让 <th> 的显式宽度被严格采用，列宽绝不被内容挤缩；
+     配合日期列 nowrap，确保 2025-04-08 永远单行显示（不折行、也不被压窄换行） */
+  table{min-width:1560px;width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed}
   th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;white-space:nowrap}
   th{background:#f8fafc;color:var(--muted);font-weight:700;position:sticky;top:0;font-size:12px;white-space:nowrap}
   tbody tr{cursor:pointer}
@@ -84,8 +86,9 @@
   td.name-cell{max-width:200px;white-space:normal;line-height:1.35}
   /* 单行省略的列：编号/许可证号/日期/坐标/设备类型/联系人/备注 */
   td.id-cell,td.lic-cell,td.date-cell,td.coord-cell{max-width:150px;overflow:hidden;text-overflow:ellipsis}
-  /* 日期列绝不允许折行：强制 nowrap + 保底宽度，确保 2025-09-25 一行显示完 */
-  td.date-cell{white-space:nowrap !important;min-width:100px}
+  /* 日期列绝不允许折行：强制 nowrap + 保底宽度，确保 2025-09-25 一行显示完；
+     word-break:keep-all 进一步防止连字符处被断行 */
+  td.date-cell{white-space:nowrap !important;min-width:100px;word-break:keep-all}
   td.dev-cell{max-width:160px;overflow:hidden;text-overflow:ellipsis}
   td.remark-cell{max-width:260px;overflow:hidden;text-overflow:ellipsis}
   .tablewrap{max-height:62vh;overflow:auto;border:1px solid var(--line);border-radius:12px}
