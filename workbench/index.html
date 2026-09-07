@@ -103,7 +103,30 @@
     padding:11px 14px;border-radius:10px;font-size:13px;font-weight:600;margin-bottom:12px}
   /* 选点模式：容器高亮 + 十字光标，提示可点击地图 */
   #amap-container.pick-on{border-color:var(--brand);box-shadow:0 0 0 3px var(--soft);cursor:crosshair}
-  .map-note{background:#fff8ec;border:1px solid #f3e2bd;color:#8a5a00;padding:12px 14px;border-radius:10px;font-size:13px}
+  /* 地图提示：默认贴在地图左下角（占位 0），点击展开全文；不抢地图纵向空间 */
+  .map-wrap{position:relative}
+  .map-note{
+    position:absolute;left:12px;bottom:12px;z-index:50;
+    background:#fff8ec;border:1px solid #f3e2bd;color:#8a5a00;
+    padding:8px 12px 8px 14px;border-radius:20px;font-size:12px;font-weight:600;
+    box-shadow:0 4px 12px rgba(0,0,0,.18);cursor:pointer;
+    max-width:320px;display:inline-flex;align-items:center;gap:6px;
+    transition:background .15s,box-shadow .15s,border-radius .15s,padding .15s,max-width .2s;
+    user-select:none;
+  }
+  .map-note:hover{background:#fff3d6;box-shadow:0 6px 16px rgba(0,0,0,.22)}
+  .map-note .note-full{display:none}
+  .map-note .note-toggle{flex:none;opacity:.55;font-size:10px;transition:transform .2s}
+  .map-note.expanded{
+    border-radius:12px;padding:12px 14px;font-size:13px;font-weight:400;
+    max-width:520px;display:block;cursor:default;line-height:1.55;
+    align-items:stretch;
+  }
+  .map-note.expanded .note-full{display:block;margin-top:8px;color:#8a5a00}
+  .map-note.expanded .note-toggle{display:inline-block;transform:rotate(180deg);margin-top:6px}
+  /* 展开后的头部：标题行 + 关闭指示 */
+  .map-note .note-head{display:flex;align-items:center;gap:6px;font-weight:700}
+  .map-note.expanded .note-head{margin-bottom:4px}
   .hint{color:var(--muted);font-size:12px;margin:6px 0 0}
   /* settings */
   .setrow{display:grid;grid-template-columns:200px 1fr;gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}
@@ -291,9 +314,11 @@
         </div>
       </div>
       <div class="bd">
-        <div id="map-note-box"></div>
-        <div id="map-hint" style="display:none"></div>
-        <div id="amap-container"></div>
+        <div class="map-wrap">
+          <div id="map-note-box"></div>
+          <div id="map-hint" style="display:none"></div>
+          <div id="amap-container"></div>
+        </div>
       </div>
     </div>
   </section>

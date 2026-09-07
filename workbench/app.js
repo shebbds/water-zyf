@@ -1048,13 +1048,28 @@
   }
 
   /* ---------------- 地图渲染 ---------------- */
-  function renderMapView(){
+  // 地图提示做成悬浮气泡（贴在地图左下角，不抢地图纵向空间），点击展开详情
+  function setMapNote(head, full){
     var box = $("map-note-box");
-    if(!state.settings.amapKey){
-      box.innerHTML = '<div class="map-note" style="margin-bottom:12px">尚未配置高德地图密钥。请前往「设置界面」填写 Key 与安全密钥后，地图与自动地理编码即可生效。</div>';
+    if(!head){
+      box.innerHTML = "";
       return;
     }
-    box.innerHTML = "";
+    box.innerHTML =
+      '<div class="map-note" onclick="this.classList.toggle(\'expanded\')">' +
+        '<span class="note-head">' + head + '</span>' +
+        (full ? '<div class="note-full">' + full + '</div>' : '') +
+        '<span class="note-toggle">▾</span>' +
+      '</div>';
+  }
+
+  function renderMapView(){
+    if(!state.settings.amapKey){
+      setMapNote('⚠️ 未配置高德地图 Key',
+        '尚未配置高德地图密钥。请前往「设置界面」填写 Key 与安全密钥后，地图与自动地理编码即可生效。');
+      return;
+    }
+    setMapNote("", null);  // 清空，等地图加载回调再决定显示什么
     ensureAmap().then(function(ok){
       if(ok){
         initMap();
@@ -1062,12 +1077,13 @@
         // 仅提示尚未编码的地址，由用户点「地理编码全部」或手动选点来完成。
         var missing = state.data.filter(function(r){ return (r.lng==null || r.lat==null) && r.address; });
         if(missing.length){
-          box.innerHTML = '<div class="map-note" style="margin-bottom:12px">已编码的坐标已记住、不会重复编码。当前还有 '+missing.length+' 条地址未编码，点上方「🔄 地理编码全部」即可生成地图点位（手动地图上选点也会自动记录坐标）。</div>';
+          setMapNote('💡 ' + missing.length + ' 条地址待编码',
+            '已编码的坐标已记住、不会重复编码。点上方「🔄 地理编码全部」即可生成地图点位（手动地图上选点也会自动记录坐标）。');
         } else {
-          box.innerHTML = "";
+          setMapNote("", null);
         }
       } else {
-        box.innerHTML = '<div class="map-note" style="margin-bottom:12px">高德地图加载失败，请检查密钥与网络。</div>';
+        setMapNote('⚠️ 地图加载失败', '高德地图加载失败，请检查密钥与网络。');
       }
     });
   }
