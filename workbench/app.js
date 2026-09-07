@@ -123,12 +123,14 @@
       try{ state.data = JSON.parse(raw); }catch(e){ state.data = []; }
     }
     try{ var s = localStorage.getItem(LS_SYNCED); state.synced = s ? JSON.parse(s) : {}; }catch(e){ state.synced = {}; }
-    if(!state.data || !state.data.length){
+    // 仅在【首次安装、从未保存过】（LS_DATA 键不存在）时才载入种子数据；
+    // 用户主动删空（LS_DATA = "[]"）时绝不能重置，否则永远删不干净。
+    if(!raw){
       state.data = (window.SEED_DATA||[]).map(function(r){
         return Object.assign({}, r, { _uid: uid(), remark:(r.remark||"") });
       });
       saveDataLocal();
-    } else {
+    } else if(state.data && state.data.length){
       state.data.forEach(function(r){ if(!r._uid) r._uid = uid(); if(r.remark===undefined) r.remark=""; });
     }
   }
@@ -227,8 +229,9 @@
   /* ---------------- 即时全量对齐（台账操作后调用） ----------------
    * 与 scheduleSync（1.5s 防抖、只 upsert）不同：syncNow 立即执行，
    * 且让【云端与本地完全一致】——新增/编辑=upsert，本地已删=从云端删除。
-   * 删除判定限定在 state.synced（本设备已知曾存在云端的许可证号）之内，
-   * 因此绝不会误删“其它设备新增、本设备还没拉到”的记录。
+   * 删除判定直接看「云端有但本地没有」：用户主动删除是明确的意图，必须立即
+   * 反映到云端；多设备间的数据合并由 loadData + pullCloud（自动拉取）保证，
+   * 不会因为本函数被误删。
    */
   var _aligning = false, _alignPending = false;
   async function syncNow(opts){
@@ -256,7 +259,7 @@
       var rd = await c.from(table).select("license");
       if(rd.error) throw rd.error;
       var stale = (rd.data || []).map(function(d){ return d.license; })
-                    .filter(function(l){ return l && !localLic[l] && state.synced[l]; });
+                    .filter(function(l){ return l && !localLic[l]; });
       if(stale.length){
         var dd = await c.from(table).delete().in("license", stale);
         if(dd.error) throw dd.error;
