@@ -25,6 +25,16 @@
   nav.tabs button:hover{background:var(--soft);color:var(--ink)}
   nav.tabs button.active{background:var(--brand);color:#fff}
   .topbar .stat{color:var(--muted);font-size:13px}
+  .topbar-right{display:flex;align-items:center;gap:10px}
+  .rt-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:4px 10px;
+    border-radius:999px;border:1px solid var(--line);color:var(--muted);background:#fff;white-space:nowrap}
+  .rt-badge::before{content:"";width:7px;height:7px;border-radius:50%;background:#c3c8d4}
+  .rt-badge.on{color:#0a7a52;border-color:#bfe8d5;background:#f2fbf6}
+  .rt-badge.on::before{background:#12b76a;box-shadow:0 0 0 3px rgba(18,183,106,.15)}
+  .rt-badge.connecting::before{background:#f5a524;animation:rtpulse 1s infinite}
+  .rt-badge.error{color:#c0392b;border-color:#f3cfc9;background:#fdf4f2}
+  .rt-badge.error::before{background:#e5484d}
+  @keyframes rtpulse{0%,100%{opacity:1}50%{opacity:.35}}
   main{max-width:1180px;margin:0 auto;padding:22px}
   .view{display:none}
   .view.active{display:block;animation:fade .2s ease}
@@ -162,7 +172,10 @@
     <button data-view="map">地图界面</button>
     <button data-view="settings">设置界面</button>
   </nav>
-  <div class="stat" id="stat">共 0 条</div>
+  <div class="topbar-right">
+    <span class="rt-badge" id="rt-badge">实时同步：未启用</span>
+    <span class="stat" id="stat">共 0 条</span>
+  </div>
 </header>
 
 <main>
@@ -292,6 +305,13 @@
         <div class="setrow">
           <div><div class="lbl">数据表名</div><div class="desc">存储单位的表，需含字段 license(主键) / id / name / address / valid_from / valid_to / lng / lat</div></div>
           <input type="text" id="set-sb-table" placeholder="units">
+        </div>
+        <div class="setrow">
+          <div><div class="lbl">多设备实时同步</div><div class="desc">其它设备增删改后，本页面自动即时更新（无需手动刷新）。需在 Supabase 执行一次 <code>alter publication supabase_realtime add table units;</code></div></div>
+          <select id="set-sb-realtime">
+            <option value="1">开启</option>
+            <option value="0">关闭</option>
+          </select>
         </div>
         <div class="actions">
           <button class="btn" id="sb-pull">从云端拉取</button>

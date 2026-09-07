@@ -14,7 +14,8 @@
     amapSecurity:"c930ea76af4fe01a9ab82e82ca85b3b2",
     supabaseUrl:"https://tchrevgamfaxjmjcqeww.supabase.co",
     supabaseKey:"sb_publishable_WDg9H-OEl5ickKrRqQpcfQ_qVFk_oM1",
-    supabaseTable:"units"
+    supabaseTable:"units",
+    realtime:true            // 多设备实时同步（Supabase Realtime）
   };
 
   var state = {
@@ -279,6 +280,60 @@
   }
   // 台账操作后的统一提交：立即落盘 + 立即与云端对齐
   function commit(opts){ saveDataLocal(); syncNow(opts); }
+
+  /* ---------------- 多设备实时同步（Supabase Realtime） ----------------
+   * 订阅 units 表的 INSERT/UPDATE/DELETE，任何设备改动后本页立即自动合并，
+   * 无需手动刷新。合并沿用 pullCloud(merge) 的规则，不会覆盖本地未同步的新增。
+   * 依赖：Supabase 后台需执行一次
+   *   alter publication supabase_realtime add table units;
+   */
+  var rtChannel = null, rtTimer = null, rtState = "off";   // off|connecting|on|error
+  function updateRtBadge(){
+    var el = $("rt-badge");
+    if(!el) return;
+    var txt = rtState === "on" ? "实时同步：已连接"
+            : rtState === "connecting" ? "实时同步：连接中…"
+            : rtState === "error" ? "实时同步：未连接"
+            : "实时同步：未启用";
+    if(state.settings.realtime === false && rtState === "off") txt = "实时同步：已关闭";
+    el.textContent = txt;
+    el.className = "rt-badge " + rtState;
+  }
+  // 收到变更事件后防抖拉取；若本端正上传，稍后再拉，避免与 syncNow 打架
+  function scheduleRealtimePull(){
+    if(rtTimer) clearTimeout(rtTimer);
+    rtTimer = setTimeout(function(){
+      rtTimer = null;
+      if(_aligning){ scheduleRealtimePull(); return; }
+      pullCloud({ confirm:false, merge:true, quietError:true, silent:true });
+    }, 600);
+  }
+  function startRealtime(){
+    var c = getSb();
+    if(!c) return;
+    if(state.settings.realtime === false){ stopRealtime(); rtState = "off"; updateRtBadge(); return; }
+    if(rtChannel) return;
+    rtState = "connecting"; updateRtBadge();
+    try{
+      rtChannel = c.channel("units-rt-" + Math.random().toString(36).slice(2,8))
+        .on("postgres_changes",
+            { event:"*", schema:"public", table: state.settings.supabaseTable },
+            function(){ scheduleRealtimePull(); })
+        .subscribe(function(status){
+          if(status === "SUBSCRIBED"){ rtState = "on"; }
+          else if(status === "CHANNEL_ERROR" || status === "TIMED_OUT"){ rtState = "error"; }
+          else if(status === "CLOSED"){ rtState = "off"; }
+          updateRtBadge();
+        });
+    }catch(e){
+      rtState = "error"; updateRtBadge();
+    }
+  }
+  function stopRealtime(){
+    if(rtTimer){ clearTimeout(rtTimer); rtTimer = null; }
+    try{ if(rtChannel){ var c = getSb(); if(c) c.removeChannel(rtChannel); } }catch(e){}
+    rtChannel = null;
+  }
   // 从云端拉取。opts: { confirm:是否先确认覆盖, merge:按许可证号合并(保留本地独有记录、坐标不空覆盖),
   //                  quietError:静默错误提示, silent:静默全部提示 }
   async function pullCloud(opts){
@@ -298,9 +353,11 @@
         rows.forEach(function(d){ cloudLicenses[d.license] = true; });
         // 仅删除“曾在云端(state.synced)、但云端现已没有”的本地记录 = 其它设备的删除已传播；
         // 从未推上云端的本地新增（不在 synced）不会被误删，刷新后保留。
-        // 重要保护：云端返回 0 条时【绝不剪枝】——这可能是 RLS 屏蔽了读取、网络异常或表为空，
-        // 不能据此认定“云端没有”，否则会把本地已有数据全部误删（刷新即空）。
-        if(rows.length > 0){
+        // 剪枝的安全条件：①云端有记录，或②本设备此前已确认过云端记录(synced 非空)。
+        // 两者都不满足时（RLS 屏蔽读取导致读到空、或首次运行）【绝不剪枝】，
+        // 否则会把本地已有数据全部误删（刷新即空）。
+        // 必须允许“云端被删空”的情况剪枝，否则其它设备删掉最后一条时本端不会跟着删。
+        if(rows.length > 0 || Object.keys(state.synced).length > 0){
           state.data = state.data.filter(function(r){
             return !r.license || !state.synced[r.license] || cloudLicenses[r.license];
           });
@@ -939,6 +996,8 @@
     $("set-sb-url").value = state.settings.supabaseUrl || "";
     $("set-sb-key").value = state.settings.supabaseKey || "";
     $("set-sb-table").value = state.settings.supabaseTable || "units";
+    var rt = $("set-sb-realtime");
+    if(rt) rt.value = (state.settings.realtime === false) ? "0" : "1";
   }
   function saveSettings(){
     var prevAmap = state.settings.amapKey + "|" + state.settings.amapSecurity;
@@ -947,7 +1006,13 @@
     state.settings.supabaseUrl = $("set-sb-url").value.trim();
     state.settings.supabaseKey = $("set-sb-key").value.trim();
     state.settings.supabaseTable = $("set-sb-table").value.trim() || "units";
+    var rtEl = $("set-sb-realtime");
+    var rtOn = rtEl ? (rtEl.value !== "0") : true;
+    state.settings.realtime = rtOn;
     saveSettingsLocal();
+    // 实时开关/连接参数变化 → 重建订阅
+    stopRealtime(); rtState = "off";
+    if(rtOn) startRealtime(); else updateRtBadge();
     var nowAmap = state.settings.amapKey + "|" + state.settings.amapSecurity;
     $("set-status").textContent = "设置已保存。";
     toast("设置已保存", "ok");
@@ -1077,6 +1142,7 @@
       if(!autoPulled && state.settings.supabaseUrl && state.settings.supabaseKey){
         autoPulled = true;
         pullCloud({ confirm:false, merge:true, quietError:true });
+        startRealtime();          // 开启实时通道：其它设备改动后本页自动更新
       }
     };
     document.head.appendChild(sb);
