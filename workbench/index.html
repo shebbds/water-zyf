@@ -35,7 +35,7 @@
   .rt-badge.error{color:#c0392b;border-color:#f3cfc9;background:#fdf4f2}
   .rt-badge.error::before{background:#e5484d}
   @keyframes rtpulse{0%,100%{opacity:1}50%{opacity:.35}}
-  main{max-width:1180px;margin:0 auto;padding:22px}
+  main{max-width:1600px;margin:0 auto;padding:22px}
   .view{display:none}
   .view.active{display:block;animation:fade .2s ease}
   @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -74,7 +74,7 @@
   .reminder .right{display:flex;align-items:center;gap:12px}
   .empty{padding:40px;text-align:center;color:var(--muted)}
   /* ledger table —— 表格设最小宽度，超出容器时 tablewrap 出现横向滚动条 */
-  table{min-width:1200px;width:100%;border-collapse:collapse;font-size:13px}
+  table{min-width:1560px;width:100%;border-collapse:collapse;font-size:13px}
   th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle;white-space:nowrap}
   th{background:#f8fafc;color:var(--muted);font-weight:700;position:sticky;top:0;font-size:12px;white-space:nowrap}
   tbody tr{cursor:pointer}
@@ -83,7 +83,9 @@
   td.addr{max-width:240px;color:var(--muted);font-size:12px;white-space:normal;line-height:1.35}
   td.name-cell{max-width:200px;white-space:normal;line-height:1.35}
   /* 单行省略的列：编号/许可证号/日期/坐标/设备类型/联系人/备注 */
-  td.id-cell,td.lic-cell,td.date-cell,td.coord-cell{max-width:140px;overflow:hidden;text-overflow:ellipsis}
+  td.id-cell,td.lic-cell,td.date-cell,td.coord-cell{max-width:150px;overflow:hidden;text-overflow:ellipsis}
+  /* 日期列绝不允许折行：强制 nowrap + 保底宽度，确保 2025-09-25 一行显示完 */
+  td.date-cell{white-space:nowrap !important;min-width:100px}
   td.dev-cell{max-width:160px;overflow:hidden;text-overflow:ellipsis}
   td.remark-cell{max-width:260px;overflow:hidden;text-overflow:ellipsis}
   .tablewrap{max-height:62vh;overflow:auto;border:1px solid var(--line);border-radius:12px}
@@ -248,9 +250,17 @@
           <table>
             <thead>
               <tr>
-                <th style="width:34px"><input type="checkbox" id="select-all" class="rowsel"></th>
-                <th>编号</th><th>单位名称</th><th>经营地址</th><th>设备类型</th><th>联系人</th><th>备注</th><th>卫生许可证号</th>
-                <th>有效期始</th><th>有效期止</th><th>坐标</th>
+                <th style="width:36px"><input type="checkbox" id="select-all" class="rowsel"></th>
+                <th style="width:70px">编号</th>
+                <th style="width:190px">单位名称</th>
+                <th style="width:250px">经营地址</th>
+                <th style="width:120px">设备类型</th>
+                <th style="width:130px">联系人</th>
+                <th style="width:210px">备注</th>
+                <th style="width:185px">卫生许可证号</th>
+                <th style="width:110px">有效期始</th>
+                <th style="width:110px">有效期止</th>
+                <th style="width:150px">坐标</th>
               </tr>
             </thead>
             <tbody id="ledger-body"></tbody>
