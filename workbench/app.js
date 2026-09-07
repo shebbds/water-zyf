@@ -854,16 +854,16 @@
       body.innerHTML = rows.map(function(r){
         return '<tr data-action="detail" data-uid="'+r._uid+'">' +
           '<td><input type="checkbox" class="rowsel row-select" data-uid="'+r._uid+'" '+(state.selected[r._uid]?"checked":"")+'></td>' +
-          '<td>'+esc(r.id)+'</td>' +
-          '<td>'+esc(r.name)+'</td>' +
-          '<td class="addr">'+esc(r.address)+'</td>' +
+          '<td class="id-cell">'+esc(r.id)+'</td>' +
+          '<td class="name-cell" title="'+esc(r.name)+'">'+esc(r.name)+'</td>' +
+          '<td class="addr" title="'+esc(r.address)+'">'+esc(r.address)+'</td>' +
           '<td class="dev-cell" title="'+esc(r.deviceType||"")+'">'+esc(r.deviceType||"")+'</td>' +
           '<td class="dev-cell" title="'+esc(r.contact||"")+'">'+esc(r.contact||"")+'</td>' +
           '<td class="remark-cell" title="'+esc(r.remark||"")+'">'+esc(r.remark||"")+'</td>' +
-          '<td>'+esc(r.license)+'</td>' +
-          '<td>'+esc(r.validFrom)+'</td>' +
-          '<td>'+esc(r.validTo)+'</td>' +
-          '<td>'+esc(coordText(r))+'</td>' +
+          '<td class="lic-cell" title="'+esc(r.license)+'">'+esc(r.license)+'</td>' +
+          '<td class="date-cell">'+esc(r.validFrom)+'</td>' +
+          '<td class="date-cell">'+esc(r.validTo)+'</td>' +
+          '<td class="coord-cell">'+esc(coordText(r))+'</td>' +
         '</tr>';
       }).join("");
     }
