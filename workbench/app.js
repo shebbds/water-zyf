@@ -165,6 +165,19 @@
     var m = (err.message||"") + " " + (err.hint||"");
     return m.indexOf("remark") >= 0 && (m.indexOf("does not exist") >= 0 || m.indexOf("column") >= 0);
   }
+  // 静默自动同步（防抖触发）失败时也要让用户看见，否则“保存失败”会被完全吞掉，
+  // 表现为“导入了、看着有，刷新就没了”却没有任何提示。同一条错误 60 秒内只提示一次。
+  var _syncErrAt = {};
+  function warnSyncError(msg){
+    var key = String(msg).slice(0, 80);
+    var now = Date.now();
+    if(_syncErrAt[key] && now - _syncErrAt[key] < 60000) return;
+    _syncErrAt[key] = now;
+    var extra = /row-level security|42501/i.test(msg)
+      ? " —— 请在 Supabase 执行：alter table units disable row level security;"
+      : "";
+    toast("云端保存失败（数据仅存本地）：" + msg + extra, "err");
+  }
   async function pushCloud(silent){
     var c = getSb();
     if(!c){ if(!silent) toast("请先在设置中配置 Supabase", "warn"); return; }
@@ -186,7 +199,9 @@
       markAllSynced();
       if(!silent) toast("已上传 "+rows.length+" 条到云端", "ok");
     }catch(e){
-      if(!silent) toast("上传失败：" + (e.message||e), "err");
+      var m = e.message || String(e);
+      if(!silent) toast("上传失败：" + m, "err");
+      else warnSyncError(m);
     }
   }
   // 云端删除：从 Supabase units 表真正删除，使该记录在云端消失；
@@ -226,10 +241,14 @@
         var cloudLicenses = {};
         rows.forEach(function(d){ cloudLicenses[d.license] = true; });
         // 仅删除“曾在云端(state.synced)、但云端现已没有”的本地记录 = 其它设备的删除已传播；
-        // 从未推上云端的本地新增（不在 synced）不会被误删，刷新后保留
-        state.data = state.data.filter(function(r){
-          return !r.license || !state.synced[r.license] || cloudLicenses[r.license];
-        });
+        // 从未推上云端的本地新增（不在 synced）不会被误删，刷新后保留。
+        // 重要保护：云端返回 0 条时【绝不剪枝】——这可能是 RLS 屏蔽了读取、网络异常或表为空，
+        // 不能据此认定“云端没有”，否则会把本地已有数据全部误删（刷新即空）。
+        if(rows.length > 0){
+          state.data = state.data.filter(function(r){
+            return !r.license || !state.synced[r.license] || cloudLicenses[r.license];
+          });
+        }
         var byLicense = {};
         state.data.forEach(function(r){ if(r.license) byLicense[r.license] = r; });
         rows.forEach(function(d){
@@ -727,9 +746,13 @@
     };
     state.data.push(rec);
     saveData(false);
-    ensureAmap().then(function(){ return geocodeMany([rec]); }).then(function(){
-      saveData(); renderLedger(); if(state.view==="map") placeMarkers();
-    });
+    scheduleSync();                       // 同上：新增后立即同步，不依赖地理编码结果
+    ensureAmap()
+      .then(function(){ return geocodeMany([rec]); })
+      .catch(function(){ /* 编码失败不影响已新增的数据 */ })
+      .then(function(){
+        saveData(); renderLedger(); if(state.view==="map") placeMarkers();
+      });
     clearAddForm();
     renderLedger();
     toast("已添加单位：" + name, "ok");
@@ -781,12 +804,21 @@
             if(address) toGeocode.push(rec);
           }
         });
+        // 先本地落盘；再【立刻】排一次云端上传。
+        // 关键：不能把“保存”押在地理编码这条链上——编码耗时长、失败（高德密钥/域名白名单）、
+        // 或编码途中刷新页面，都会导致 .then 里的 saveData() 永远不执行，
+        // 新导入的数据就从未推上云端（表现为“导入后没保存，刷新就没了”）。
         saveData(false);
-        ensureAmap().then(function(){ return geocodeMany(toGeocode); }).then(function(){
-          saveData(); renderLedger(); if(state.view==="map") placeMarkers();
-        });
+        scheduleSync();
+        ensureAmap()
+          .then(function(){ return geocodeMany(toGeocode); })
+          .catch(function(){ /* 地理编码失败不影响已导入的数据 */ })
+          .then(function(){
+            // 无论编码成功与否，都要再落盘并同步一次（把坐标写回）
+            saveData(); renderLedger(); if(state.view==="map") placeMarkers();
+          });
         renderLedger();
-        toast("导入完成：新增 "+added+" 条，覆盖更新 "+updated+" 条", "ok");
+        toast("导入完成：新增 "+added+" 条，覆盖更新 "+updated+" 条（已保存并同步）", "ok");
       }catch(err){
         toast("导入失败：" + (err.message||err), "err");
       }
