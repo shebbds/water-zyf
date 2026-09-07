@@ -223,6 +223,59 @@
     if(syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(function(){ pushCloud(true); }, 1500);
   }
+
+  /* ---------------- 即时全量对齐（台账操作后调用） ----------------
+   * 与 scheduleSync（1.5s 防抖、只 upsert）不同：syncNow 立即执行，
+   * 且让【云端与本地完全一致】——新增/编辑=upsert，本地已删=从云端删除。
+   * 删除判定限定在 state.synced（本设备已知曾存在云端的许可证号）之内，
+   * 因此绝不会误删“其它设备新增、本设备还没拉到”的记录。
+   */
+  var _aligning = false, _alignPending = false;
+  async function syncNow(opts){
+    opts = opts || {};
+    if(_aligning){ _alignPending = true; return; }   // 已有同步在跑 → 结束后补跑一次
+    var c = getSb();
+    if(!c){ if(!opts.silent) toast("请先在设置中配置 Supabase", "warn"); return; }
+    _aligning = true;
+    try{
+      var table = state.settings.supabaseTable;
+      // 1) 上传本地全部记录（覆盖新增与编辑）
+      var rows = toRows();
+      var res = await c.from(table).upsert(rows, { onConflict:"license" });
+      if(res.error && isRemarkColumnError(res.error)){
+        // units 表尚无 remark 列时，去掉备注重试，保证其余字段仍同步
+        rows = rows.map(function(r){ var x = Object.assign({}, r); delete x.remark; return x; });
+        res = await c.from(table).upsert(rows, { onConflict:"license" });
+      }
+      if(res.error) throw res.error;
+      markAllSynced();
+
+      // 2) 删除云端残留：本设备曾同步过(synced)、但本地现已没有的记录
+      var localLic = {};
+      state.data.forEach(function(r){ if(r.license) localLic[r.license] = true; });
+      var rd = await c.from(table).select("license");
+      if(rd.error) throw rd.error;
+      var stale = (rd.data || []).map(function(d){ return d.license; })
+                    .filter(function(l){ return l && !localLic[l] && state.synced[l]; });
+      if(stale.length){
+        var dd = await c.from(table).delete().in("license", stale);
+        if(dd.error) throw dd.error;
+      }
+      if(!opts.silent){
+        toast("已与云端对齐：" + state.data.length + " 条" +
+              (stale.length ? ("，同步删除 " + stale.length + " 条") : ""), "ok");
+      }
+    }catch(e){
+      var m = e.message || String(e);
+      if(!opts.silent) toast("云端对齐失败：" + m, "err");
+      else warnSyncError(m);
+    }finally{
+      _aligning = false;
+      if(_alignPending){ _alignPending = false; syncNow(opts); }
+    }
+  }
+  // 台账操作后的统一提交：立即落盘 + 立即与云端对齐
+  function commit(opts){ saveDataLocal(); syncNow(opts); }
   // 从云端拉取。opts: { confirm:是否先确认覆盖, merge:按许可证号合并(保留本地独有记录、坐标不空覆盖),
   //                  quietError:静默错误提示, silent:静默全部提示 }
   async function pullCloud(opts){
@@ -506,7 +559,7 @@
     });
   }
   function reverseGeocode(lng, lat, rec){
-    if(!state.geocoder){ rec.lng=lng; rec.lat=lat; saveData(); refreshIfMap(); return; }
+    if(!state.geocoder){ rec.lng=lng; rec.lat=lat; commit({silent:true}); refreshIfMap(); return; }
     state.geocoder.getAddress([lng, lat], function(status, result){
       var addr = "";
       if(status === "complete" && result.regeocode){
@@ -516,7 +569,7 @@
       rec.lng = lng; rec.lat = lat;
       var dAddr = $("detail-address");
       if(dAddr) dAddr.textContent = addr || (lng.toFixed(6)+", "+lat.toFixed(6));
-      saveData();
+      commit({silent:true});
       refreshIfMap();
       toast("已更新地址与坐标：" + (addr || (lng.toFixed(6)+", "+lat.toFixed(6))), "ok");
     });
@@ -611,7 +664,7 @@
       rec.validFrom = $("e-from").value;
       rec.validTo = $("e-to").value;
       rec.remark = $("e-remark").value;
-      saveData();
+      commit();          // 立即落盘 + 立即与云端对齐
       refreshIfMap();
       renderCurrentView();
       closeModal();
@@ -685,7 +738,7 @@
       if(!d){ toast("请选择日期", "warn"); return; }
       rec.validFrom = d;
       rec.validTo = calcValidTo(d);
-      saveData();
+      commit();          // 立即落盘 + 立即与云端对齐
       renderCurrentView();
       closeModal();
       toast("已办结：" + rec.name + " 有效期更新至 " + rec.validTo, "ok");
@@ -746,7 +799,7 @@
     };
     state.data.push(rec);
     saveData(false);
-    scheduleSync();                       // 同上：新增后立即同步，不依赖地理编码结果
+    syncNow({silent:true});   // 立即与云端对齐，不再依赖地理编码结果
     ensureAmap()
       .then(function(){ return geocodeMany([rec]); })
       .catch(function(){ /* 编码失败不影响已新增的数据 */ })
@@ -809,7 +862,7 @@
         // 或编码途中刷新页面，都会导致 .then 里的 saveData() 永远不执行，
         // 新导入的数据就从未推上云端（表现为“导入后没保存，刷新就没了”）。
         saveData(false);
-        scheduleSync();
+        syncNow({silent:true});   // 导入后立即与云端对齐，不等地理编码
         ensureAmap()
           .then(function(){ return geocodeMany(toGeocode); })
           .catch(function(){ /* 地理编码失败不影响已导入的数据 */ })
@@ -830,13 +883,11 @@
     var keys = Object.keys(state.selected).filter(function(k){ return state.selected[k]; });
     if(!keys.length){ toast("请先勾选要删除的记录", "warn"); return; }
     if(!confirm("确定删除选中的 "+keys.length+" 条记录？此操作不可撤销。")) return;
-    // 先收集要删除记录的许可证号，用于同步删除云端（否则云端残留会在刷新时被自动拉取复活）
-    var delLicenses = state.data.filter(function(r){ return state.selected[r._uid]; })
-                        .map(function(r){ return r.license; }).filter(Boolean);
     state.data = state.data.filter(function(r){ return !state.selected[r._uid]; });
     keys.forEach(function(k){ delete state.selected[k]; });
-    saveData();
-    deleteCloud(delLicenses, true);
+    // 立即与云端对齐：syncNow 会依据 synced 标记把刚删掉的记录从云端删掉，
+    // 否则云端残留会在刷新时被自动拉取“复活”
+    commit();
     renderLedger();
     if(state.view==="map") placeMarkers();
     toast("已删除 "+keys.length+" 条", "ok");
