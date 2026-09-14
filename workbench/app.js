@@ -37,7 +37,13 @@
     mapQuery: "",           // 地图当前搜索词
     ledgerQuery: "",        // 台账搜索词
     targetUid: null,        // 地图当前选中的目标单位（红色高亮 + 周边单位锚点）
-    targetCircles: []       // 目标周围距离圆（AMap.Circle 覆盖物）引用，便于清理
+    targetCircles: [],      // 目标周围距离圆（AMap.Circle 覆盖物）引用，便于清理
+    targetRadius: 200,      // 当前“周围单位”半径（米）
+    _clickTimer: null,      // 标记单击延时器（用于区分单击 / 双击）
+    _lastClickUid: null,    // 上一次点击的标记 uid（双击判定）
+    _lastClickTs: 0,        // 上一次点击时间戳
+    _markerClickTs: 0,      // 标记点击时间戳（防地图冒泡误清空）
+    _detailOpenTs: 0        // 详情弹窗最近打开时间（防多条事件路径重复弹窗）
   };
 
   /* ---------------- 工具函数 ---------------- */
@@ -456,12 +462,42 @@
   function initMap(){
     var el = $("amap-container");
     if(!state.amap){
-      state.amap = new window.AMap.Map(el, { zoom:12, center:[116.41,39.95] });
+      // doubleClickZoom:false —— 双击留给“打开单位详情”，避免高德双击缩放抢占事件
+      state.amap = new window.AMap.Map(el, { zoom:12, center:[116.41,39.95], doubleClickZoom:false });
       state.amap.addControl(new window.AMap.ToolBar());
       state.amap.addControl(new window.AMap.Scale());
       state.amap.on("click", onMapClick);   // 仅在地图创建时绑定一次，避免重复监听
+      // 兜底①：DOM 级双击监听。不依赖高德 SDK 是否代理 marker 的 dblclick 事件，
+      // 只要双击落在标记圆点（.mk-dot）上就打开详情，稳定性最高。
+      el.addEventListener("dblclick", function(e){
+        if(state.pickMode) return;
+        var dot = e.target && e.target.closest ? e.target.closest(".mk-dot") : null;
+        var uid = dot ? dot.getAttribute("data-uid") : null;
+        // 兜底：两次点击之间标记可能被重建（DOM 已替换，e.target 落到容器上），
+        // 此时用最近一次点击的标记作为双击对象
+        if(!uid && state._lastClickUid && (Date.now() - state._lastClickTs) < 800){
+          uid = state._lastClickUid;
+        }
+        if(!uid) return;
+        e.stopPropagation();
+        e.preventDefault();
+        openDetailFromMap(uid);
+      }, true);
     }
     placeMarkers();
+  }
+  // 取消“待执行的单击设目标”，供双击时调用
+  // 注意：_lastClickUid / _lastClickTs 保留，作为“最近点击的标记”供双击兜底使用
+  function cancelPendingTargetClick(){
+    if(state._clickTimer){ clearTimeout(state._clickTimer); state._clickTimer = null; }
+  }
+  // 统一入口：从地图标记打开单位详情（双击 / SDK dblclick 两条路径共用，500ms 内去重）
+  function openDetailFromMap(uid){
+    var now = Date.now();
+    if(state._detailOpenTs && now - state._detailOpenTs < 500) return;
+    state._detailOpenTs = now;
+    cancelPendingTargetClick();     // 双击不切换目标，只弹详情
+    openDetail(uid);
   }
   function placeMarkers(){
     if(!state.amap) return;
@@ -490,11 +526,9 @@
         if(state.pickMode){ pickMarkerChosen(rec._uid); return; }
         state._markerClickTs = Date.now();            // 立即记录，供空白地图点击防抖
         var now = Date.now();
-        if(state._lastClickUid === rec._uid && (now - state._lastClickTs) < 320){
-          // 双击同一标记：取消待执行的单击，直接弹详情（不切换目标）
-          if(state._clickTimer){ clearTimeout(state._clickTimer); state._clickTimer = null; }
-          state._lastClickUid = null; state._lastClickTs = 0;
-          openDetail(rec._uid);
+        if(state._lastClickUid === rec._uid && (now - state._lastClickTs) < 350){
+          state._lastClickUid = rec._uid; state._lastClickTs = now;
+          openDetailFromMap(rec._uid);   // 双击同一标记：弹详情，且不改变当前目标
           return;
         }
         state._lastClickUid = rec._uid; state._lastClickTs = now;
@@ -502,7 +536,12 @@
         state._clickTimer = setTimeout(function(){
           state._clickTimer = null;
           selectTarget(rec._uid);        // 单击：设为目标（红色+闪烁+面板+距离圆）
-        }, 280);
+        }, 260);
+      });
+      // 兜底②：高德 SDK 原生 dblclick（部分版本会代理该事件）
+      marker.on("dblclick", function(){
+        if(state.pickMode) return;
+        openDetailFromMap(rec._uid);
       });
       marker.setMap(state.amap);
       state.markers[rec._uid] = marker;
@@ -574,16 +613,23 @@
         zIndex: 6
       });
       circle.setMap(state.amap);
+      // 点击距离圈（目标单位以外的区域）→ 取消目标选中，清除同心圆
+      circle.on("click", function(e){
+        if(e && e.originEvent && e.originEvent.stopPropagation) e.originEvent.stopPropagation();
+        clearTarget();
+      });
       state.targetCircles.push(circle);
     });
   }
   // 按半径渲染目标周围单位清单（手动点击半径 tab 触发），并同步在地图上画对应半径的圆
   function showNearby(radius){
+    state.targetRadius = radius;
     drawTargetCircles(radius);     // 先画/更新距离圆（含清理旧圆；无坐标则清空）
     var tabs = $("radius-tabs");   // 同步快捷选择高亮：自定义半径时无 tab 高亮
     if(tabs) Array.prototype.forEach.call(tabs.children, function(b){
       b.classList.toggle("active", parseInt(b.getAttribute("data-r"), 10) === radius);
     });
+    var rl = $("nearby-radius-label"); if(rl) rl.textContent = radius + "m";
     var list = $("nearby-list"); if(!list) return;
     var target = state.data.find(function(r){ return r._uid === state.targetUid; });
     if(!target || target.lng == null || target.lat == null){
@@ -611,35 +657,42 @@
       '</div>';
     }).join("");
   }
-  // 右侧目标卡片 + 显示周边面板（默认 200m）
+  // 右侧目标卡片 + 显示周边面板
   function updateSidePanel(){
     var card = $("target-card"); if(!card) return;
     var rec = state.data.find(function(r){ return r._uid === state.targetUid; });
     if(!rec){
-      card.innerHTML = '<div class="target-empty">在上方搜索框输入关键词，点击候选单位即可将其设为<strong>目标单位</strong>：地图标记变红并闪烁 3 秒，右侧显示其周边单位。</div>';
+      card.innerHTML = '<div class="target-empty">在上方搜索框输入关键词，点击候选单位即可将其设为<strong>目标单位</strong>：地图标记变红并闪烁 3 秒，右侧显示其周边单位。<br><br>提示：单击地图上的圆点 = 设为目标；<strong>双击圆点 = 查看单位详情</strong>；点击地图空白处或距离圈 = 取消。</div>';
       var nb0 = $("nearby-block"); if(nb0) nb0.style.display = "none";
       return;
     }
+    function row(label, val){
+      return '<div class="tc-row"><b>'+label+'：</b>'+(val ? esc(val) : '<span style="color:#9aa1ae">未填写</span>')+'</div>';
+    }
     card.innerHTML =
       '<div class="tc-name">'+esc(rec.name)+'</div>'+
-      (rec.license ? '<div class="tc-row"><b>许可证号：</b>'+esc(rec.license)+'</div>' : '')+
-      (rec.address ? '<div class="tc-row"><b>经营地址：</b>'+esc(rec.address)+'</div>' : '')+
-      (rec.deviceType ? '<div class="tc-row"><b>设备类型：</b>'+esc(rec.deviceType)+'</div>' : '')+
-      (rec.contact ? '<div class="tc-row"><b>联系人：</b>'+esc(rec.contact)+'</div>' : '')+
-      (rec.validFrom || rec.validTo ? '<div class="tc-row"><b>有效期：</b>'+esc(rec.validFrom||'')+' 至 '+esc(rec.validTo||'')+'</div>' : '')+
-      (rec.remark ? '<div class="tc-row tc-remark"><b>备注：</b>'+esc(rec.remark)+'</div>' : '')+
+      row("许可证号", rec.license)+
+      row("经营地址", rec.address)+
+      row("设备类型", rec.deviceType)+
+      row("联系人", rec.contact)+
+      ((rec.validFrom || rec.validTo) ? '<div class="tc-row"><b>有效期：</b>'+esc(rec.validFrom||'')+' 至 '+esc(rec.validTo||'')+'</div>' : '')+
+      (rec.remark ? '<div class="tc-row tc-remark"><b>备注：</b>'+esc(rec.remark)+'</div>'
+                  : '<div class="tc-row"><b>备注：</b><span style="color:#9aa1ae">未填写</span></div>')+
       (rec.lng != null ? '<div class="tc-row"><b>坐标：</b>'+rec.lng.toFixed(6)+', '+rec.lat.toFixed(6)+'</div>'
                        : '<div class="tc-row">坐标：暂无（未编码）</div>')+
-      '<div class="tc-actions"><button id="tc-edit" class="btn sm">编辑</button></div>';
-    var editBtn = $("tc-edit");
-    if(editBtn) editBtn.addEventListener("click", function(){ openDetail(rec._uid); });
+      '<div class="tc-actions">'+
+        '<button id="tc-edit" class="btn sm primary">✏️ 编辑</button>'+
+        '<button id="tc-detail" class="btn sm">单位详情</button>'+
+        '<button id="tc-clear" class="btn sm">清除目标</button>'+
+      '</div>';
+    var editBtn = $("tc-edit");   if(editBtn)   editBtn.addEventListener("click", function(){ openDetail(rec._uid); });
+    var detBtn  = $("tc-detail"); if(detBtn)    detBtn.addEventListener("click", function(){ openDetail(rec._uid); });
+    var clrBtn  = $("tc-clear");  if(clrBtn)    clrBtn.addEventListener("click", function(){ clearTarget(); });
     var nb = $("nearby-block"); if(nb) nb.style.display = "flex";
-    var tabs = $("radius-tabs");
-    if(tabs) Array.prototype.forEach.call(tabs.children, function(b){
-      b.classList.toggle("active", b.getAttribute("data-r") === "200");
-    });
-    var cus = $("nearby-custom"); if(cus) cus.value = "";
-    showNearby(200);
+    var r = state.targetRadius || 200;
+    var cus = $("nearby-custom");
+    if(cus) cus.value = ([200,300,500,800].indexOf(r) === -1) ? String(r) : "";
+    showNearby(r);
   }
   /* ---------------- 地图手动选点（在主地图操作，不嵌套弹窗） ---------------- */
   function enterPickMode(){
@@ -661,9 +714,18 @@
     state.pickTarget = uid;
     showMapHint("已选择「"+rec.name+"」：请在地图上点击任意位置以更新其地址与坐标（Esc 取消）");
   }
-  // 点击空白地图区域：取消目标选中（清空红色高亮、距离圆与右侧面板）
+  // 点击空白地图区域 / 距离圈：取消目标选中（清空红色高亮、同心距离圆与右侧面板）
   function clearTarget(){
-    if(!state.targetUid) return;
+    cancelPendingTargetClick();
+    state._markerClickTs = 0;
+    if(!state.targetUid){
+      // 目标已为空，但保险起见再清一次残留圆
+      if(state.targetCircles && state.targetCircles.length){
+        state.targetCircles.forEach(function(c){ try{ c.setMap(null); }catch(e){} });
+        state.targetCircles = [];
+      }
+      return;
+    }
     state.targetUid = null;
     if(state.targetCircles && state.targetCircles.length){
       state.targetCircles.forEach(function(c){ try{ c.setMap(null); }catch(e){} });
@@ -676,9 +738,12 @@
   function applyCustomRadius(){
     var el = $("nearby-custom"); if(!el) return;
     var v = parseFloat(el.value);
-    if(!v || v <= 0){ toast("请输入有效的距离（米）", "warn"); return; }
-    if(v > 5000){ v = 5000; el.value = "5000"; }
+    if(!v || v <= 0){ toast("请输入有效的距离（米），如 350", "warn"); el.focus(); return; }
+    if(v > 5000){ v = 5000; el.value = "5000"; toast("自定义距离上限 5000m，已按 5000m 计算", "warn"); }
+    v = Math.round(v);
+    el.value = String(v);
     showNearby(v);
+    toast("周围单位范围已设为 "+v+"m", "ok");
   }
   function onMapClick(e){
     if(state.pickMode){
@@ -689,8 +754,12 @@
       if(rec){ reverseGeocode(lng, lat, rec); }
       return;
     }
-    // 非选点模式：刚点过标记则忽略（防冒泡误清空），否则取消目标选中
-    if(state._markerClickTs && Date.now() - state._markerClickTs < 400) return;
+    // 非选点模式：
+    // ① 若事件来自覆盖物（标记 / 距离圆，带 setMap 方法），交给覆盖物自己的处理器，不在此清空
+    if(e && e.target && e.target !== state.amap && typeof e.target.setMap === "function") return;
+    // ② 刚点过标记（同一次点击冒泡到地图）时忽略，避免“刚选中就被清空”
+    if(state._markerClickTs && Date.now() - state._markerClickTs < 300) return;
+    // ③ 其余情况（点击目标单位以外的任意区域）→ 取消目标选中并清除同心圆
     clearTarget();
   }
   function showMapHint(msg){
@@ -1211,6 +1280,8 @@
     ensureAmap().then(function(ok){
       if(ok){
         initMap();
+        // 回到地图视图时同步右侧面板（目标卡片 / 周围单位 / 距离圈高亮）
+        if(state.targetUid) updateSidePanel();
         // 容器尺寸可能随布局变化（如从 block 改为 flex 子项），主动重算地图尺寸，避免空白
         try { if(state.amap && state.amap.resize) state.amap.resize(); } catch(e){}
         // 坐标已持久化（localStorage + Supabase），打开地图不再重新编码；
@@ -1364,10 +1435,10 @@
       if(state.pickMode) exitPickMode();
       else enterPickMode();
     });
-    // 周围单位：手动选择半径；点击 item 可把该单位设为新目标
+    // 周围单位：快捷半径（200/300/500/800m）；点击 item 可把该单位设为新目标
     $("radius-tabs").addEventListener("click", function(e){
       var b = e.target.closest("button"); if(!b) return;
-      Array.prototype.forEach.call(this.children, function(x){ x.classList.toggle("active", x === b); });
+      var cus = $("nearby-custom"); if(cus) cus.value = "";   // 选快捷值时清空自定义输入
       showNearby(parseInt(b.getAttribute("data-r"), 10));
     });
     // 周围单位：自定义距离窗口（应用按钮 / 回车均可触发）
@@ -1410,9 +1481,12 @@
   /* ---------------- 启动 ---------------- */
   window.__wb = { closeModal: closeModal, openDetail: openDetail, enterPickMode: enterPickMode, exitPickMode: exitPickMode };
 
-  // Esc 取消地图手动选点
+  // Esc：取消地图手动选点 / 取消目标选中（清除同心圆与右侧面板）
   document.addEventListener("keydown", function(e){
-    if(e.key === "Escape" && state.pickMode) exitPickMode();
+    if(e.key !== "Escape") return;
+    if(state.pickMode){ exitPickMode(); return; }
+    if($("modal-overlay")) return;          // 弹窗打开时交给弹窗处理
+    if(state.targetUid) clearTarget();
   });
   function init(){
     loadSettings();

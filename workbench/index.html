@@ -2,6 +2,9 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>一揽星河挂锦帆</title>
 <style>
@@ -116,7 +119,9 @@
   .target-empty{padding:34px 14px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6}
   .nearby-block{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;
     display:flex;flex-direction:column;gap:10px}
-  .nearby-head{font-weight:700;font-size:14px}
+  .nearby-head{font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .nearby-head .nr-label{font-size:11px;padding:3px 9px}
+  .nearby-tip{font-size:11px;color:var(--muted);line-height:1.5}
   .radius-tabs{display:flex;gap:6px;flex-wrap:wrap}
   .radius-tabs button{background:#fff;border:1px solid var(--line);border-radius:999px;
     padding:5px 12px;cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);transition:.12s}
@@ -362,7 +367,10 @@
               <div class="target-empty">在上方搜索框输入关键词，点击候选单位即可将其设为<strong>目标单位</strong>：地图标记变红并闪烁 3 秒，右侧显示其周边单位。</div>
             </div>
             <div class="nearby-block" id="nearby-block" style="display:none">
-              <div class="nearby-head">周围单位（以目标为中心）</div>
+              <div class="nearby-head">
+                <span>周围单位（以目标为中心）</span>
+                <span class="pill gray nr-label" id="nearby-radius-label">200m</span>
+              </div>
               <div class="radius-tabs" id="radius-tabs">
                 <button data-r="200">200m</button>
                 <button data-r="300">300m</button>
@@ -370,10 +378,11 @@
                 <button data-r="800">800m</button>
               </div>
               <div class="nearby-custom">
-                <input type="number" id="nearby-custom" min="10" step="10" placeholder="自定义" />
+                <input type="number" id="nearby-custom" min="10" max="5000" step="10" placeholder="自定义距离" />
                 <span class="nc-unit">m</span>
                 <button id="nearby-custom-apply" class="btn sm">应用</button>
               </div>
+              <div class="nearby-tip">自定义距离后回车或点「应用」；点击地图空白处 / 距离圈可取消目标。</div>
               <div class="nearby-list" id="nearby-list"></div>
             </div>
           </aside>
@@ -433,7 +442,7 @@
 
 <div id="toast-wrap"></div>
 
-<script src="seed.js"></script>
-<script src="app.js"></script>
+<script src="seed.js?v=20260914b"></script>
+<script src="app.js?v=20260914b"></script>
 </body>
 </html>
