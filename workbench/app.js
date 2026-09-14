@@ -1135,6 +1135,8 @@
     ensureAmap().then(function(ok){
       if(ok){
         initMap();
+        // 容器尺寸可能随布局变化（如从 block 改为 flex 子项），主动重算地图尺寸，避免空白
+        try { if(state.amap && state.amap.resize) state.amap.resize(); } catch(e){}
         // 坐标已持久化（localStorage + Supabase），打开地图不再重新编码；
         // 仅提示尚未编码的地址，由用户点「地理编码全部」或手动选点来完成。
         var missing = state.data.filter(function(r){ return (r.lng==null || r.lat==null) && r.address; });

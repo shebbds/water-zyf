@@ -104,7 +104,7 @@
   /* 选点模式：容器高亮 + 十字光标，提示可点击地图 */
   #amap-container.pick-on{border-color:var(--brand);box-shadow:0 0 0 3px var(--soft);cursor:crosshair}
   /* 地图提示：默认贴在地图左下角（占位 0），点击展开全文；不抢地图纵向空间 */
-  .map-wrap{position:relative}
+  .map-wrap{position:relative;flex:1;min-width:0}
   /* 地图 + 右侧“目标/周围单位”面板 左右布局 */
   .map-layout{display:flex;gap:16px;align-items:stretch}
   .side-panel{width:330px;flex:none;display:flex;flex-direction:column;gap:12px;
