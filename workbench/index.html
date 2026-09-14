@@ -122,6 +122,11 @@
     padding:5px 12px;cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);transition:.12s}
   .radius-tabs button:hover{border-color:var(--brand);color:var(--brand)}
   .radius-tabs button.active{background:var(--brand);border-color:var(--brand);color:#fff}
+  .nearby-custom{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+  .nearby-custom input{width:96px}
+  .nearby-custom .nc-unit{flex:none}
+  .target-card .tc-actions{margin-top:12px;display:flex;gap:8px}
+  .target-card .tc-remark{white-space:pre-wrap;word-break:break-word}
   .nearby-list{display:flex;flex-direction:column;gap:8px;max-height:46vh;overflow:auto}
   .nearby-item{border:1px solid var(--line);border-radius:10px;padding:9px 11px;cursor:pointer;transition:.12s}
   .nearby-item:hover{background:var(--soft);border-color:#cdd6ea}
@@ -359,10 +364,15 @@
             <div class="nearby-block" id="nearby-block" style="display:none">
               <div class="nearby-head">周围单位（以目标为中心）</div>
               <div class="radius-tabs" id="radius-tabs">
-                <button data-r="100">100m</button>
                 <button data-r="200">200m</button>
+                <button data-r="300">300m</button>
                 <button data-r="500">500m</button>
                 <button data-r="800">800m</button>
+              </div>
+              <div class="nearby-custom">
+                <input type="number" id="nearby-custom" min="10" step="10" placeholder="自定义" />
+                <span class="nc-unit">m</span>
+                <button id="nearby-custom-apply" class="btn sm">应用</button>
               </div>
               <div class="nearby-list" id="nearby-list"></div>
             </div>

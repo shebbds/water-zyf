@@ -488,12 +488,21 @@
       });
       marker.on("click", function(){
         if(state.pickMode){ pickMarkerChosen(rec._uid); return; }
-        state._markerClickTs = Date.now();
-        selectTarget(rec._uid);          // 单击：仅设为目标（红色+闪烁+面板+距离圆），不弹详情
-      });
-      marker.on("dblclick", function(){
-        if(state.pickMode) return;
-        openDetail(rec._uid);            // 双击：弹出单位详情
+        state._markerClickTs = Date.now();            // 立即记录，供空白地图点击防抖
+        var now = Date.now();
+        if(state._lastClickUid === rec._uid && (now - state._lastClickTs) < 320){
+          // 双击同一标记：取消待执行的单击，直接弹详情（不切换目标）
+          if(state._clickTimer){ clearTimeout(state._clickTimer); state._clickTimer = null; }
+          state._lastClickUid = null; state._lastClickTs = 0;
+          openDetail(rec._uid);
+          return;
+        }
+        state._lastClickUid = rec._uid; state._lastClickTs = now;
+        if(state._clickTimer) clearTimeout(state._clickTimer);
+        state._clickTimer = setTimeout(function(){
+          state._clickTimer = null;
+          selectTarget(rec._uid);        // 单击：设为目标（红色+闪烁+面板+距离圆）
+        }, 280);
       });
       marker.setMap(state.amap);
       state.markers[rec._uid] = marker;
@@ -541,7 +550,7 @@
             Math.cos(lat1*toR)*Math.cos(lat2*toR)*Math.sin(dLng/2)*Math.sin(dLng/2);
     return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
   }
-  // 以目标为中心画 100/200/500/800m 同心圆；选中半径对应的圆加粗高亮
+  // 以目标为中心画 200/300/500/800m 同心圆；自定义半径额外加粗高亮
   function drawTargetCircles(activeRadius){
     if(state.targetCircles && state.targetCircles.length){
       state.targetCircles.forEach(function(c){ try{ c.setMap(null); }catch(e){} });
@@ -549,7 +558,10 @@
     state.targetCircles = [];
     var target = state.data.find(function(r){ return r._uid === state.targetUid; });
     if(!target || target.lng == null || target.lat == null || !state.amap) return;
-    [100,200,500,800].forEach(function(rd){
+    var base = [200,300,500,800];
+    var radii = base.slice();
+    if(activeRadius && base.indexOf(activeRadius) === -1) radii.push(activeRadius);
+    radii.forEach(function(rd){
       var active = (rd === activeRadius);
       var circle = new window.AMap.Circle({
         center:[target.lng, target.lat],
@@ -568,6 +580,10 @@
   // 按半径渲染目标周围单位清单（手动点击半径 tab 触发），并同步在地图上画对应半径的圆
   function showNearby(radius){
     drawTargetCircles(radius);     // 先画/更新距离圆（含清理旧圆；无坐标则清空）
+    var tabs = $("radius-tabs");   // 同步快捷选择高亮：自定义半径时无 tab 高亮
+    if(tabs) Array.prototype.forEach.call(tabs.children, function(b){
+      b.classList.toggle("active", parseInt(b.getAttribute("data-r"), 10) === radius);
+    });
     var list = $("nearby-list"); if(!list) return;
     var target = state.data.find(function(r){ return r._uid === state.targetUid; });
     if(!target || target.lng == null || target.lat == null){
@@ -611,13 +627,18 @@
       (rec.deviceType ? '<div class="tc-row"><b>设备类型：</b>'+esc(rec.deviceType)+'</div>' : '')+
       (rec.contact ? '<div class="tc-row"><b>联系人：</b>'+esc(rec.contact)+'</div>' : '')+
       (rec.validFrom || rec.validTo ? '<div class="tc-row"><b>有效期：</b>'+esc(rec.validFrom||'')+' 至 '+esc(rec.validTo||'')+'</div>' : '')+
+      (rec.remark ? '<div class="tc-row tc-remark"><b>备注：</b>'+esc(rec.remark)+'</div>' : '')+
       (rec.lng != null ? '<div class="tc-row"><b>坐标：</b>'+rec.lng.toFixed(6)+', '+rec.lat.toFixed(6)+'</div>'
-                       : '<div class="tc-row">坐标：暂无（未编码）</div>');
+                       : '<div class="tc-row">坐标：暂无（未编码）</div>')+
+      '<div class="tc-actions"><button id="tc-edit" class="btn sm">编辑</button></div>';
+    var editBtn = $("tc-edit");
+    if(editBtn) editBtn.addEventListener("click", function(){ openDetail(rec._uid); });
     var nb = $("nearby-block"); if(nb) nb.style.display = "flex";
     var tabs = $("radius-tabs");
     if(tabs) Array.prototype.forEach.call(tabs.children, function(b){
       b.classList.toggle("active", b.getAttribute("data-r") === "200");
     });
+    var cus = $("nearby-custom"); if(cus) cus.value = "";
     showNearby(200);
   }
   /* ---------------- 地图手动选点（在主地图操作，不嵌套弹窗） ---------------- */
@@ -650,6 +671,14 @@
     state.targetCircles = [];
     placeMarkers();
     updateSidePanel();
+  }
+  // 周围单位：自定义距离（米）应用
+  function applyCustomRadius(){
+    var el = $("nearby-custom"); if(!el) return;
+    var v = parseFloat(el.value);
+    if(!v || v <= 0){ toast("请输入有效的距离（米）", "warn"); return; }
+    if(v > 5000){ v = 5000; el.value = "5000"; }
+    showNearby(v);
   }
   function onMapClick(e){
     if(state.pickMode){
@@ -1340,6 +1369,11 @@
       var b = e.target.closest("button"); if(!b) return;
       Array.prototype.forEach.call(this.children, function(x){ x.classList.toggle("active", x === b); });
       showNearby(parseInt(b.getAttribute("data-r"), 10));
+    });
+    // 周围单位：自定义距离窗口（应用按钮 / 回车均可触发）
+    $("nearby-custom-apply").addEventListener("click", applyCustomRadius);
+    $("nearby-custom").addEventListener("keydown", function(e){
+      if(e.key === "Enter") applyCustomRadius();
     });
     $("nearby-list").addEventListener("click", function(e){
       var it = e.target.closest(".nearby-item"); if(!it) return;
