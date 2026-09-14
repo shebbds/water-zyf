@@ -35,7 +35,8 @@
     searchMatches: {},      // uid -> true（搜索命中集合）
     searchJustRan: false,   // 本次搜索刚触发（用于播放一次跳动）
     mapQuery: "",           // 地图当前搜索词
-    ledgerQuery: ""         // 台账搜索词
+    ledgerQuery: "",        // 台账搜索词
+    targetUid: null         // 地图当前选中的目标单位（红色高亮 + 周边单位锚点）
   };
 
   /* ---------------- 工具函数 ---------------- */
@@ -469,11 +470,12 @@
       if(rec.lng==null || rec.lat==null) return;
       // 圆形标记；搜索高亮/跳动直接写入内容 class，保证稳定生效
       var cls = "mk-dot";
+      if(rec._uid === state.targetUid) cls += " target";
       if(state.searchActive){
         if(state.searchMatches[rec._uid]){
           cls += " hl";
           if(state.searchJustRan) cls += " bounce";
-        } else cls += " dim";
+        } else if(rec._uid !== state.targetUid) cls += " dim";
       }
       var marker = new window.AMap.Marker({
         position:[rec.lng, rec.lat],
@@ -498,35 +500,94 @@
     var el = $("map-count");
     if(el) el.textContent = state.searchActive ? ("命中 "+Object.keys(state.searchMatches).length+" 个") : ("共 "+cnt+" 个点位");
   }
-  // 搜索：高亮匹配项（跳动）+ 其余淡化，并缩放地图以显示全部结果
-  function performSearch(q){
-    var box = $("map-suggest");
-    if(box){ box.style.display = "none"; box.innerHTML = ""; }
-    q = (q||"").trim().toLowerCase();
-    if(!q){
-      state.searchActive = false; state.searchMatches = {}; state.searchJustRan = false;
-      placeMarkers();
-      var c = $("map-count"); if(c) c.textContent = "共 "+Object.keys(state.markers).length+" 个点位";
+  // 选中目标单位：地图飞至、标记变红、闪烁 3 秒、右侧面板显示周边
+  function selectTarget(uid){
+    var rec = state.data.find(function(r){ return r._uid === uid; });
+    if(!rec) return;
+    state.targetUid = uid;
+    state.searchActive = false; state.searchMatches = {}; state.searchJustRan = false;
+    var box = $("map-suggest"); if(box){ box.style.display = "none"; box.innerHTML = ""; }
+    var s = $("map-search"); if(s) s.value = rec.name;
+    state.mapQuery = rec.name;
+    placeMarkers();                 // 重建标记：目标标红，其余保持原样
+    if(rec.lng != null && state.amap){
+      try { state.amap.setZoomAndCenter(16, [rec.lng, rec.lat]); }
+      catch(e){ state.amap.setCenter([rec.lng, rec.lat]); }
+    }
+    blinkTarget();
+    updateSidePanel();
+  }
+  // 目标标记闪烁约 3 秒（动画类自动移除；红色高亮 .target 持续保留）
+  function blinkTarget(){
+    var uid = state.targetUid; if(!uid) return;
+    var el = document.querySelector('.mk-dot[data-uid="'+uid+'"]');
+    if(!el) return;
+    el.classList.remove("blink");
+    void el.offsetWidth;            // 强制重排以重置动画
+    el.classList.add("blink");
+    setTimeout(function(){ if(el) el.classList.remove("blink"); }, 3000);
+  }
+  // 球面距离（米），用于“周围单位”
+  function haversine(lng1, lat1, lng2, lat2){
+    var R = 6371000, toR = Math.PI/180;
+    var dLat = (lat2-lat1)*toR, dLng = (lng2-lng1)*toR;
+    var a = Math.sin(dLat/2)*Math.sin(dLat/2) +
+            Math.cos(lat1*toR)*Math.cos(lat2*toR)*Math.sin(dLng/2)*Math.sin(dLng/2);
+    return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+  }
+  // 按半径渲染目标周围单位清单（手动点击半径 tab 触发）
+  function showNearby(radius){
+    var list = $("nearby-list"); if(!list) return;
+    var target = state.data.find(function(r){ return r._uid === state.targetUid; });
+    if(!target || target.lng == null || target.lat == null){
+      list.innerHTML = '<div class="nearby-empty">目标单位暂无坐标，无法计算周边（可先点「🔄 地理编码全部」或「📍 手动选点」）。</div>';
       return;
     }
-    var matched = {};
-    state.data.forEach(function(rec){
-      var hit = (rec.name + rec.address + rec.license).toLowerCase().indexOf(q) >= 0;
-      if(hit){ matched[rec._uid] = true; }
+    var items = [];
+    state.data.forEach(function(r){
+      if(r._uid === target._uid) return;
+      if(r.lng == null || r.lat == null) return;
+      var d = haversine(target.lng, target.lat, r.lng, r.lat);
+      if(d <= radius) items.push({ rec:r, dist:d });
     });
-    state.searchActive = true;
-    state.searchMatches = matched;
-    state.searchJustRan = true;     // 触发一次跳动
-    placeMarkers();                 // 重建标记，高亮/跳动直接写入内容
-    // 从“重建后”的 markers 中收集命中项（旧引用已离图，必须用新引用）
-    var matchedMarkers = Object.keys(state.searchMatches)
-      .map(function(u){ return state.markers[u]; })
-      .filter(Boolean);
-    if(matchedMarkers.length){
-      state.amap.setFitView(matchedMarkers, false, [80,80,80,80]);
+    items.sort(function(a,b){ return a.dist - b.dist; });
+    if(!items.length){
+      list.innerHTML = '<div class="nearby-empty">'+radius+'m 范围内没有其他已编码单位。</div>';
+      return;
     }
-    var c = $("map-count");
-    if(c) c.textContent = "命中并高亮 "+matchedMarkers.length+" 个（跳动中）";
+    list.innerHTML = items.map(function(it){
+      var r = it.rec;
+      return '<div class="nearby-item" data-uid="'+r._uid+'">'+
+        '<span class="ni-dist">'+it.dist+'m</span>'+
+        '<div class="ni-name">'+esc(r.name)+'</div>'+
+        '<div class="ni-sub">'+(r.license ? esc(r.license)+' ｜ ' : '')+esc(r.address||'')+'</div>'+
+      '</div>';
+    }).join("");
+  }
+  // 右侧目标卡片 + 显示周边面板（默认 200m）
+  function updateSidePanel(){
+    var card = $("target-card"); if(!card) return;
+    var rec = state.data.find(function(r){ return r._uid === state.targetUid; });
+    if(!rec){
+      card.innerHTML = '<div class="target-empty">在上方搜索框输入关键词，点击候选单位即可将其设为<strong>目标单位</strong>：地图标记变红并闪烁 3 秒，右侧显示其周边单位。</div>';
+      var nb0 = $("nearby-block"); if(nb0) nb0.style.display = "none";
+      return;
+    }
+    card.innerHTML =
+      '<div class="tc-name">'+esc(rec.name)+'</div>'+
+      (rec.license ? '<div class="tc-row"><b>许可证号：</b>'+esc(rec.license)+'</div>' : '')+
+      (rec.address ? '<div class="tc-row"><b>经营地址：</b>'+esc(rec.address)+'</div>' : '')+
+      (rec.deviceType ? '<div class="tc-row"><b>设备类型：</b>'+esc(rec.deviceType)+'</div>' : '')+
+      (rec.contact ? '<div class="tc-row"><b>联系人：</b>'+esc(rec.contact)+'</div>' : '')+
+      (rec.validFrom || rec.validTo ? '<div class="tc-row"><b>有效期：</b>'+esc(rec.validFrom||'')+' 至 '+esc(rec.validTo||'')+'</div>' : '')+
+      (rec.lng != null ? '<div class="tc-row"><b>坐标：</b>'+rec.lng.toFixed(6)+', '+rec.lat.toFixed(6)+'</div>'
+                       : '<div class="tc-row">坐标：暂无（未编码）</div>');
+    var nb = $("nearby-block"); if(nb) nb.style.display = "flex";
+    var tabs = $("radius-tabs");
+    if(tabs) Array.prototype.forEach.call(tabs.children, function(b){
+      b.classList.toggle("active", b.getAttribute("data-r") === "200");
+    });
+    showNearby(200);
   }
   /* ---------------- 地图手动选点（在主地图操作，不嵌套弹窗） ---------------- */
   function enterPickMode(){
@@ -578,12 +639,13 @@
     if(!q){ box.style.display = "none"; box.innerHTML = ""; return; }
     var matches = state.data.filter(function(r){
       return (r.name + r.address + r.license).toLowerCase().indexOf(q) >= 0;
-    }).slice(0, 10);
+    }).slice(0, 12);
     if(!matches.length){ box.style.display = "none"; box.innerHTML = ""; return; }
     box.innerHTML = matches.map(function(r){
       return '<div class="suggest-item" data-uid="'+r._uid+'">'+
         '<div class="si-name">'+esc(r.name)+'</div>'+
-        '<div class="si-sub">'+esc(r.license)+' ｜ '+esc(r.address)+'</div>'+
+        (r.license ? '<div class="si-lic">许可证号：'+esc(r.license)+'</div>' : '')+
+        (r.address ? '<div class="si-addr">地址：'+esc(r.address)+'</div>' : '')+
       '</div>';
     }).join("");
     box.style.display = "block";
@@ -1203,17 +1265,15 @@
     // 地图搜索：边输入边出候选项；回车执行高亮跳动
     $("map-search").addEventListener("input", onSearchInput);
     $("map-search").addEventListener("keydown", function(e){
-      if(e.key === "Enter"){ state.mapQuery = this.value; performSearch(this.value); }
+      if(e.key === "Enter"){
+        var first = $("map-suggest").querySelector(".suggest-item");
+        if(first) selectTarget(first.getAttribute("data-uid"));
+        else state.mapQuery = this.value;
+      }
     });
     $("map-suggest").addEventListener("click", function(e){
       var it = e.target.closest(".suggest-item"); if(!it) return;
-      var u = it.getAttribute("data-uid");
-      var rec = state.data.find(function(r){ return r._uid === u; });
-      if(!rec) return;
-      $("map-search").value = rec.name;
-      state.mapQuery = rec.name;
-      performSearch(rec.name);
-      if(rec.lng != null && state.amap) state.amap.setCenter([rec.lng, rec.lat]);
+      selectTarget(it.getAttribute("data-uid"));
     });
     // 点击空白处收起候选项
     document.addEventListener("click", function(e){
@@ -1225,6 +1285,16 @@
       // 若已在选点模式则再次点击退出，否则进入
       if(state.pickMode) exitPickMode();
       else enterPickMode();
+    });
+    // 周围单位：手动选择半径；点击 item 可把该单位设为新目标
+    $("radius-tabs").addEventListener("click", function(e){
+      var b = e.target.closest("button"); if(!b) return;
+      Array.prototype.forEach.call(this.children, function(x){ x.classList.toggle("active", x === b); });
+      showNearby(parseInt(b.getAttribute("data-r"), 10));
+    });
+    $("nearby-list").addEventListener("click", function(e){
+      var it = e.target.closest(".nearby-item"); if(!it) return;
+      selectTarget(it.getAttribute("data-uid"));
     });
 
     // 设置

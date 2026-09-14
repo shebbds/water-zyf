@@ -105,6 +105,30 @@
   #amap-container.pick-on{border-color:var(--brand);box-shadow:0 0 0 3px var(--soft);cursor:crosshair}
   /* 地图提示：默认贴在地图左下角（占位 0），点击展开全文；不抢地图纵向空间 */
   .map-wrap{position:relative}
+  /* 地图 + 右侧“目标/周围单位”面板 左右布局 */
+  .map-layout{display:flex;gap:16px;align-items:stretch}
+  .side-panel{width:330px;flex:none;display:flex;flex-direction:column;gap:12px;
+    max-height:82vh;overflow:auto;padding-right:2px}
+  .target-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px}
+  .target-card .tc-name{font-weight:700;font-size:15px;margin-bottom:10px;line-height:1.4}
+  .target-card .tc-row{font-size:12px;color:var(--muted);margin:5px 0;line-height:1.5}
+  .target-card .tc-row b{color:var(--ink);font-weight:600}
+  .target-empty{padding:34px 14px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6}
+  .nearby-block{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;
+    display:flex;flex-direction:column;gap:10px}
+  .nearby-head{font-weight:700;font-size:14px}
+  .radius-tabs{display:flex;gap:6px;flex-wrap:wrap}
+  .radius-tabs button{background:#fff;border:1px solid var(--line);border-radius:999px;
+    padding:5px 12px;cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);transition:.12s}
+  .radius-tabs button:hover{border-color:var(--brand);color:var(--brand)}
+  .radius-tabs button.active{background:var(--brand);border-color:var(--brand);color:#fff}
+  .nearby-list{display:flex;flex-direction:column;gap:8px;max-height:46vh;overflow:auto}
+  .nearby-item{border:1px solid var(--line);border-radius:10px;padding:9px 11px;cursor:pointer;transition:.12s}
+  .nearby-item:hover{background:var(--soft);border-color:#cdd6ea}
+  .nearby-item .ni-name{font-weight:600;font-size:13px}
+  .nearby-item .ni-dist{float:right;color:var(--brand);font-weight:700;font-size:12px;margin-left:8px}
+  .nearby-item .ni-sub{color:var(--muted);font-size:12px;margin-top:4px;white-space:normal;line-height:1.4}
+  .nearby-empty{color:var(--muted);font-size:12px;padding:8px 2px}
   .map-note{
     position:absolute;left:12px;bottom:12px;z-index:50;
     background:#fff8ec;border:1px solid #f3e2bd;color:#8a5a00;
@@ -163,8 +187,10 @@
   .suggest-item{padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--line)}
   .suggest-item:last-child{border-bottom:none}
   .suggest-item:hover{background:var(--soft)}
-  .si-name{font-weight:600;font-size:13px}
-  .si-sub{color:var(--muted);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .si-name{font-weight:600;font-size:13px;margin-bottom:3px}
+  .si-sub{color:var(--muted);font-size:12px;margin-top:2px;white-space:normal;line-height:1.4}
+  .si-lic{color:var(--muted);font-size:12px;margin-top:1px;white-space:normal;line-height:1.4}
+  .si-addr{color:var(--muted);font-size:12px;margin-top:1px;white-space:normal;line-height:1.4}
   /* 圆形标记（简单设计：蓝色实心圆 + 白边 + 阴影） */
   .mk-dot{width:18px;height:18px;border-radius:50%;cursor:pointer;
     background:radial-gradient(circle at 35% 30%, #7ea8ff 0%, #2f6bff 65%, #1f4fd6 100%);
@@ -172,9 +198,15 @@
   .mk-dot:hover{transform:scale(1.18)}
   .mk-dot.dim{opacity:.22}
   .mk-dot.hl{box-shadow:0 0 0 4px rgba(47,107,255,.35),0 2px 10px rgba(31,37,51,.45);z-index:5}
+  /* 选中目标：红色高亮（持续），叠加 blink 时闪烁 3 秒后自动移除 */
+  .mk-dot.target{background:radial-gradient(circle at 35% 30%, #ff9a9a 0%, #e5484d 65%, #b91c1c 100%);
+    box-shadow:0 0 0 4px rgba(229,72,77,.4),0 2px 10px rgba(31,37,51,.5);z-index:9}
+  @keyframes mk-blink{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.28;transform:scale(1.28)}}
+  .mk-dot.blink{animation:mk-blink .5s ease-in-out 6}   /* 0.5s × 6 = 约 3 秒 */
   .mk-dot.bounce{animation:mk-bounce .6s ease 2}
   @keyframes mk-bounce{0%,100%{transform:translateY(0)}30%{transform:translateY(-12px)}60%{transform:translateY(0)}80%{transform:translateY(-5px)}}
-  @media(max-width:760px){.addgrid,.editgrid{grid-template-columns:1fr}.setrow{grid-template-columns:1fr}}
+  @media(max-width:760px){.addgrid,.editgrid{grid-template-columns:1fr}.setrow{grid-template-columns:1fr}
+    .map-layout{flex-direction:column}.side-panel{width:100%;max-height:none}}
   /* 手机端适配 */
   @media(max-width:600px){
     .topbar{flex-wrap:wrap;height:auto;padding:8px 12px;gap:8px}
@@ -314,10 +346,27 @@
         </div>
       </div>
       <div class="bd">
-        <div class="map-wrap">
-          <div id="map-note-box"></div>
-          <div id="map-hint" style="display:none"></div>
-          <div id="amap-container"></div>
+        <div class="map-layout">
+          <div class="map-wrap">
+            <div id="map-note-box"></div>
+            <div id="map-hint" style="display:none"></div>
+            <div id="amap-container"></div>
+          </div>
+          <aside class="side-panel">
+            <div class="target-card" id="target-card">
+              <div class="target-empty">在上方搜索框输入关键词，点击候选单位即可将其设为<strong>目标单位</strong>：地图标记变红并闪烁 3 秒，右侧显示其周边单位。</div>
+            </div>
+            <div class="nearby-block" id="nearby-block" style="display:none">
+              <div class="nearby-head">周围单位（以目标为中心）</div>
+              <div class="radius-tabs" id="radius-tabs">
+                <button data-r="100">100m</button>
+                <button data-r="200">200m</button>
+                <button data-r="500">500m</button>
+                <button data-r="800">800m</button>
+              </div>
+              <div class="nearby-list" id="nearby-list"></div>
+            </div>
+          </aside>
         </div>
       </div>
     </div>
