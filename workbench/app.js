@@ -36,7 +36,8 @@
     searchJustRan: false,   // 本次搜索刚触发（用于播放一次跳动）
     mapQuery: "",           // 地图当前搜索词
     ledgerQuery: "",        // 台账搜索词
-    targetUid: null         // 地图当前选中的目标单位（红色高亮 + 周边单位锚点）
+    targetUid: null,        // 地图当前选中的目标单位（红色高亮 + 周边单位锚点）
+    targetCircles: []       // 目标周围距离圆（AMap.Circle 覆盖物）引用，便于清理
   };
 
   /* ---------------- 工具函数 ---------------- */
@@ -487,7 +488,7 @@
       });
       marker.on("click", function(){
         if(state.pickMode) pickMarkerChosen(rec._uid);
-        else openDetail(rec._uid);
+        else { selectTarget(rec._uid); openDetail(rec._uid); }
       });
       marker.setMap(state.amap);
       state.markers[rec._uid] = marker;
@@ -535,8 +536,33 @@
             Math.cos(lat1*toR)*Math.cos(lat2*toR)*Math.sin(dLng/2)*Math.sin(dLng/2);
     return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
   }
-  // 按半径渲染目标周围单位清单（手动点击半径 tab 触发）
+  // 以目标为中心画 100/200/500/800m 同心圆；选中半径对应的圆加粗高亮
+  function drawTargetCircles(activeRadius){
+    if(state.targetCircles && state.targetCircles.length){
+      state.targetCircles.forEach(function(c){ try{ c.setMap(null); }catch(e){} });
+    }
+    state.targetCircles = [];
+    var target = state.data.find(function(r){ return r._uid === state.targetUid; });
+    if(!target || target.lng == null || target.lat == null || !state.amap) return;
+    [100,200,500,800].forEach(function(rd){
+      var active = (rd === activeRadius);
+      var circle = new window.AMap.Circle({
+        center:[target.lng, target.lat],
+        radius: rd,
+        strokeColor: active ? "#e5484d" : "#2f6bff",
+        strokeOpacity: active ? 0.9 : 0.45,
+        strokeWeight: active ? 3 : 1,
+        fillColor: active ? "#e5484d" : "#2f6bff",
+        fillOpacity: active ? 0.10 : 0.04,
+        zIndex: 6
+      });
+      circle.setMap(state.amap);
+      state.targetCircles.push(circle);
+    });
+  }
+  // 按半径渲染目标周围单位清单（手动点击半径 tab 触发），并同步在地图上画对应半径的圆
   function showNearby(radius){
+    drawTargetCircles(radius);     // 先画/更新距离圆（含清理旧圆；无坐标则清空）
     var list = $("nearby-list"); if(!list) return;
     var target = state.data.find(function(r){ return r._uid === state.targetUid; });
     if(!target || target.lng == null || target.lat == null){
