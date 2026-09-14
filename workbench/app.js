@@ -487,8 +487,13 @@
         extData:{ uid:rec._uid }
       });
       marker.on("click", function(){
-        if(state.pickMode) pickMarkerChosen(rec._uid);
-        else { selectTarget(rec._uid); openDetail(rec._uid); }
+        if(state.pickMode){ pickMarkerChosen(rec._uid); return; }
+        state._markerClickTs = Date.now();
+        selectTarget(rec._uid);          // 单击：仅设为目标（红色+闪烁+面板+距离圆），不弹详情
+      });
+      marker.on("dblclick", function(){
+        if(state.pickMode) return;
+        openDetail(rec._uid);            // 双击：弹出单位详情
       });
       marker.setMap(state.amap);
       state.markers[rec._uid] = marker;
@@ -635,13 +640,29 @@
     state.pickTarget = uid;
     showMapHint("已选择「"+rec.name+"」：请在地图上点击任意位置以更新其地址与坐标（Esc 取消）");
   }
+  // 点击空白地图区域：取消目标选中（清空红色高亮、距离圆与右侧面板）
+  function clearTarget(){
+    if(!state.targetUid) return;
+    state.targetUid = null;
+    if(state.targetCircles && state.targetCircles.length){
+      state.targetCircles.forEach(function(c){ try{ c.setMap(null); }catch(e){} });
+    }
+    state.targetCircles = [];
+    placeMarkers();
+    updateSidePanel();
+  }
   function onMapClick(e){
-    if(!state.pickMode) return;
-    if(!state.pickTarget) return;   // 需先点选单位标记
-    var lng = e.lnglat.getLng(), lat = e.lnglat.getLat();
-    var rec = state.data.find(function(r){ return r._uid === state.pickTarget; });
-    exitPickMode();
-    if(rec){ reverseGeocode(lng, lat, rec); }
+    if(state.pickMode){
+      if(!state.pickTarget) return;   // 需先点选单位标记
+      var lng = e.lnglat.getLng(), lat = e.lnglat.getLat();
+      var rec = state.data.find(function(r){ return r._uid === state.pickTarget; });
+      exitPickMode();
+      if(rec){ reverseGeocode(lng, lat, rec); }
+      return;
+    }
+    // 非选点模式：刚点过标记则忽略（防冒泡误清空），否则取消目标选中
+    if(state._markerClickTs && Date.now() - state._markerClickTs < 400) return;
+    clearTarget();
   }
   function showMapHint(msg){
     var h = $("map-hint");
