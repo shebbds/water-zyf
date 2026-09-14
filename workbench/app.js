@@ -37,7 +37,7 @@
     mapQuery: "",           // 地图当前搜索词
     ledgerQuery: "",        // 台账搜索词
     targetUid: null,        // 地图当前选中的目标单位（红色高亮 + 周边单位锚点）
-    targetCircles: [],      // 目标周围距离圆（AMap.Circle 覆盖物）引用，便于清理
+    targetCircles: [],      // 当前距离圆（AMap.Circle，只保留“选定/自定义”那一个）引用，便于清理
     targetRadius: 200,      // 当前“周围单位”半径（米）
     _clickTimer: null,      // 标记单击延时器（用于区分单击 / 双击）
     _lastClickUid: null,    // 上一次点击的标记 uid（双击判定）
@@ -589,7 +589,7 @@
             Math.cos(lat1*toR)*Math.cos(lat2*toR)*Math.sin(dLng/2)*Math.sin(dLng/2);
     return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
   }
-  // 以目标为中心画 200/300/500/800m 同心圆；自定义半径额外加粗高亮
+  // 以目标为中心，只画【当前选定/自定义】的那一个距离圆（不再叠加显示全部半径）
   function drawTargetCircles(activeRadius){
     if(state.targetCircles && state.targetCircles.length){
       state.targetCircles.forEach(function(c){ try{ c.setMap(null); }catch(e){} });
@@ -597,31 +597,27 @@
     state.targetCircles = [];
     var target = state.data.find(function(r){ return r._uid === state.targetUid; });
     if(!target || target.lng == null || target.lat == null || !state.amap) return;
-    var base = [200,300,500,800];
-    var radii = base.slice();
-    if(activeRadius && base.indexOf(activeRadius) === -1) radii.push(activeRadius);
-    radii.forEach(function(rd){
-      var active = (rd === activeRadius);
-      var circle = new window.AMap.Circle({
-        center:[target.lng, target.lat],
-        radius: rd,
-        strokeColor: active ? "#e5484d" : "#2f6bff",
-        strokeOpacity: active ? 0.9 : 0.45,
-        strokeWeight: active ? 3 : 1,
-        fillColor: active ? "#e5484d" : "#2f6bff",
-        fillOpacity: active ? 0.10 : 0.04,
-        zIndex: 6
-      });
-      circle.setMap(state.amap);
-      // 点击距离圈（目标单位以外的区域）→ 取消目标选中，清除同心圆
-      circle.on("click", function(e){
-        if(e && e.originEvent && e.originEvent.stopPropagation) e.originEvent.stopPropagation();
-        clearTarget();
-      });
-      state.targetCircles.push(circle);
+    var rd = parseFloat(activeRadius);
+    if(!rd || rd <= 0) rd = 200;                  // 兜底：半径非法时按 200m
+    var circle = new window.AMap.Circle({
+      center:[target.lng, target.lat],
+      radius: rd,
+      strokeColor:"#e5484d",
+      strokeOpacity:0.85,
+      strokeWeight:3,
+      fillColor:"#e5484d",
+      fillOpacity:0.08,
+      zIndex:6
     });
+    circle.setMap(state.amap);
+    // 点击距离圈（目标单位以外的区域）→ 取消目标选中，清除距离圆
+    circle.on("click", function(e){
+      if(e && e.originEvent && e.originEvent.stopPropagation) e.originEvent.stopPropagation();
+      clearTarget();
+    });
+    state.targetCircles.push(circle);
   }
-  // 按半径渲染目标周围单位清单（手动点击半径 tab 触发），并同步在地图上画对应半径的圆
+  // 按半径渲染目标周围单位清单（点击半径 tab / 自定义距离触发），并在地图上画出对应半径的圆
   function showNearby(radius){
     state.targetRadius = radius;
     drawTargetCircles(radius);     // 先画/更新距离圆（含清理旧圆；无坐标则清空）
@@ -714,7 +710,7 @@
     state.pickTarget = uid;
     showMapHint("已选择「"+rec.name+"」：请在地图上点击任意位置以更新其地址与坐标（Esc 取消）");
   }
-  // 点击空白地图区域 / 距离圈：取消目标选中（清空红色高亮、同心距离圆与右侧面板）
+  // 点击空白地图区域 / 距离圈：取消目标选中（清空红色高亮、距离圆与右侧面板）
   function clearTarget(){
     cancelPendingTargetClick();
     state._markerClickTs = 0;
@@ -759,7 +755,7 @@
     if(e && e.target && e.target !== state.amap && typeof e.target.setMap === "function") return;
     // ② 刚点过标记（同一次点击冒泡到地图）时忽略，避免“刚选中就被清空”
     if(state._markerClickTs && Date.now() - state._markerClickTs < 300) return;
-    // ③ 其余情况（点击目标单位以外的任意区域）→ 取消目标选中并清除同心圆
+    // ③ 其余情况（点击目标单位以外的任意区域）→ 取消目标选中并清除距离圆
     clearTarget();
   }
   function showMapHint(msg){
@@ -1481,7 +1477,7 @@
   /* ---------------- 启动 ---------------- */
   window.__wb = { closeModal: closeModal, openDetail: openDetail, enterPickMode: enterPickMode, exitPickMode: exitPickMode };
 
-  // Esc：取消地图手动选点 / 取消目标选中（清除同心圆与右侧面板）
+  // Esc：取消地图手动选点 / 取消目标选中（清除距离圆与右侧面板）
   document.addEventListener("keydown", function(e){
     if(e.key !== "Escape") return;
     if(state.pickMode){ exitPickMode(); return; }
