@@ -215,6 +215,11 @@
   .mk-dot.blink{animation:mk-blink .5s ease-in-out 6}   /* 0.5s × 6 = 约 3 秒 */
   .mk-dot.bounce{animation:mk-bounce .6s ease 2}
   @keyframes mk-bounce{0%,100%{transform:translateY(0)}30%{transform:translateY(-12px)}60%{transform:translateY(0)}80%{transform:translateY(-5px)}}
+  /* 周围单位单击定位：橙色高亮 + 跳动 2 秒（0.5s × 4），到时由 JS 移除类名恢复原样 */
+  .mk-dot.orange{background:radial-gradient(circle at 35% 30%, #ffd88a 0%, #f59e0b 65%, #b45309 100%);
+    box-shadow:0 0 0 4px rgba(245,158,11,.45),0 2px 10px rgba(31,37,51,.5);z-index:8}
+  .mk-dot.bounce2{animation:mk-bounce .5s ease-in-out 4}
+  .nearby-item.flash{background:#fff7e6;border-color:#f5a524;box-shadow:0 0 0 2px rgba(245,158,11,.18)}
   @media(max-width:760px){.addgrid,.editgrid{grid-template-columns:1fr}.setrow{grid-template-columns:1fr}
     .map-layout{flex-direction:column}.side-panel{width:100%;max-height:none}}
   /* 手机端适配 */
@@ -382,7 +387,7 @@
                 <span class="nc-unit">m</span>
                 <button id="nearby-custom-apply" class="btn sm">应用</button>
               </div>
-              <div class="nearby-tip">自定义距离后回车或点「应用」；点击地图空白处 / 距离圈可取消目标。</div>
+              <div class="nearby-tip">自定义距离后回车或点「应用」；单击列表项：地图上该单位<strong>橙色跳动 2 秒</strong>（不变更目标），双击：把它切换为<strong>目标单位</strong>。点击地图空白处 / 距离圈可取消目标。</div>
               <div class="nearby-list" id="nearby-list"></div>
             </div>
           </aside>
@@ -442,7 +447,7 @@
 
 <div id="toast-wrap"></div>
 
-<script src="seed.js?v=20260914c"></script>
-<script src="app.js?v=20260914c"></script>
+<script src="seed.js?v=20260914d"></script>
+<script src="app.js?v=20260914d"></script>
 </body>
 </html>

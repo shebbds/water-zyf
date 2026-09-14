@@ -43,7 +43,12 @@
     _lastClickUid: null,    // 上一次点击的标记 uid（双击判定）
     _lastClickTs: 0,        // 上一次点击时间戳
     _markerClickTs: 0,      // 标记点击时间戳（防地图冒泡误清空）
-    _detailOpenTs: 0        // 详情弹窗最近打开时间（防多条事件路径重复弹窗）
+    _detailOpenTs: 0,       // 详情弹窗最近打开时间（防多条事件路径重复弹窗）
+    _nbTimer: null,         // 周围单位列表单击延时器（区分单击 / 双击）
+    _nbUid: null,           // 上一次点击的周围单位 uid
+    _nbTs: 0,               // 上一次点击时间戳
+    _nbDblTs: 0,            // 最近一次双击触发时间（防 click+dblclick 双路径重复切换）
+    _flashTimer: null       // 橙色跳动复位计时器
   };
 
   /* ---------------- 工具函数 ---------------- */
@@ -581,6 +586,47 @@
     el.classList.add("blink");
     setTimeout(function(){ if(el) el.classList.remove("blink"); }, 3000);
   }
+  // 周围单位列表单击：地图上对应标记变橙 + 跳动 2 秒，之后自动恢复原样（不改变目标）
+  function flashNearbyMarker(uid){
+    var rec = state.data.find(function(r){ return r._uid === uid; });
+    if(!rec) return;
+    if(rec.lng == null || rec.lat == null){
+      toast("「"+(rec.name||"该单位")+"」暂无坐标，无法在地图上定位", "warn");
+      return;
+    }
+    var el = document.querySelector('.mk-dot[data-uid="'+uid+'"]');
+    if(!el){
+      toast("该单位未在地图上显示，可先点「🔄 地理编码全部」", "warn");
+      return;
+    }
+    // 若标记不在当前视野内，先把地图移到它身上，保证能看到跳动
+    try{
+      var b = state.amap && state.amap.getBounds ? state.amap.getBounds() : null;
+      if(b && b.contains && !b.contains([rec.lng, rec.lat])) state.amap.setCenter([rec.lng, rec.lat]);
+    }catch(e){}
+    el.classList.remove("orange","bounce2");
+    void el.offsetWidth;                       // 强制重排，重置动画
+    el.classList.add("orange","bounce2");
+    var item = document.querySelector('.nearby-item[data-uid="'+uid+'"]');
+    if(item) item.classList.add("flash");
+    if(state._flashTimer) clearTimeout(state._flashTimer);
+    state._flashTimer = setTimeout(function(){  // 2 秒后恢复（0.5s × 4）
+      var e2 = document.querySelector('.mk-dot[data-uid="'+uid+'"]');
+      if(e2) e2.classList.remove("orange","bounce2");
+      var it2 = document.querySelector('.nearby-item[data-uid="'+uid+'"]');
+      if(it2) it2.classList.remove("flash");
+      state._flashTimer = null;
+    }, 2000);
+  }
+  // 周围单位列表双击：把该单位切换为目标单位（同心圆随之移动到它身上）
+  function nearbyItemDouble(uid){
+    var now = Date.now();
+    if(now - state._nbDblTs < 500) return;     // click 路径与 dblclick 路径去重
+    state._nbDblTs = now;
+    if(state._nbTimer){ clearTimeout(state._nbTimer); state._nbTimer = null; }
+    state._nbUid = null; state._nbTs = 0;
+    selectTarget(uid);
+  }
   // 球面距离（米），用于“周围单位”
   function haversine(lng1, lat1, lng2, lat2){
     var R = 6371000, toR = Math.PI/180;
@@ -603,8 +649,8 @@
       center:[target.lng, target.lat],
       radius: rd,
       strokeColor:"#e5484d",
-      strokeOpacity:0.85,
-      strokeWeight:3,
+      strokeOpacity:0.8,
+      strokeWeight:1.5,          // 描边细一些（原为 3）
       fillColor:"#e5484d",
       fillOpacity:0.08,
       zIndex:6
@@ -1442,9 +1488,26 @@
     $("nearby-custom").addEventListener("keydown", function(e){
       if(e.key === "Enter") applyCustomRadius();
     });
+    // 周围单位列表：单击 = 地图上该单位橙色跳动 2 秒；双击 = 切换为目标单位
     $("nearby-list").addEventListener("click", function(e){
       var it = e.target.closest(".nearby-item"); if(!it) return;
-      selectTarget(it.getAttribute("data-uid"));
+      var uid = it.getAttribute("data-uid");
+      var now = Date.now();
+      if(state._nbUid === uid && (now - state._nbTs) < 350){
+        nearbyItemDouble(uid);       // 连点两次 → 切换目标
+        return;
+      }
+      state._nbUid = uid; state._nbTs = now;
+      if(state._nbTimer) clearTimeout(state._nbTimer);
+      state._nbTimer = setTimeout(function(){
+        state._nbTimer = null;
+        flashNearbyMarker(uid);      // 单击 → 橙色跳动 2 秒后恢复
+      }, 260);
+    });
+    // 兜底：原生 dblclick（与上面的时间戳检测共用去重，不会重复切换）
+    $("nearby-list").addEventListener("dblclick", function(e){
+      var it = e.target.closest(".nearby-item"); if(!it) return;
+      nearbyItemDouble(it.getAttribute("data-uid"));
     });
 
     // 设置
