@@ -122,6 +122,9 @@
   .nearby-head{font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:space-between;gap:8px}
   .nearby-head .nr-label{font-size:11px;padding:3px 9px}
   .nearby-tip{font-size:11px;color:var(--muted);line-height:1.5}
+  /* 待编码单位列表项里的操作按钮 */
+  .unloc-item .unloc-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+  .unloc-item .ni-sub{word-break:break-all}
   .radius-tabs{display:flex;gap:6px;flex-wrap:wrap}
   .radius-tabs button{background:#fff;border:1px solid var(--line);border-radius:999px;
     padding:5px 12px;cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);transition:.12s}
@@ -390,6 +393,15 @@
               <div class="nearby-tip">自定义距离后回车或点「应用」；单击列表项：地图上该单位<strong>橙色跳动 2 秒</strong>（不变更目标），双击：把它切换为<strong>目标单位</strong>。点击地图空白处 / 距离圈可取消目标。</div>
               <div class="nearby-list" id="nearby-list"></div>
             </div>
+            <!-- 待编码单位：无坐标 → 地图上没有标记，这里提供手动定位入口 -->
+            <div class="nearby-block" id="unloc-block" style="display:none">
+              <div class="nearby-head">
+                <span>待编码单位（地图上无点位）</span>
+                <span class="pill amber nr-label" id="unloc-count">0</span>
+              </div>
+              <div class="nearby-tip">点「📍 定位」后，在地图上点一下该单位的实际位置即可写入坐标；「自动编码」按地址让高德自动查坐标。</div>
+              <div class="nearby-list" id="unloc-list"></div>
+            </div>
           </aside>
         </div>
       </div>
@@ -447,7 +459,7 @@
 
 <div id="toast-wrap"></div>
 
-<script src="seed.js?v=20260914d"></script>
-<script src="app.js?v=20260914d"></script>
+<script src="seed.js?v=20260919a"></script>
+<script src="app.js?v=20260919a"></script>
 </body>
 </html>

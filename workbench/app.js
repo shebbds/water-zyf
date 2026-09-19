@@ -48,7 +48,8 @@
     _nbUid: null,           // 上一次点击的周围单位 uid
     _nbTs: 0,               // 上一次点击时间戳
     _nbDblTs: 0,            // 最近一次双击触发时间（防 click+dblclick 双路径重复切换）
-    _flashTimer: null       // 橙色跳动复位计时器
+    _flashTimer: null,      // 橙色跳动复位计时器
+    _unlocSig: ""           // 待编码单位集合签名（避免列表无谓重建、丢失滚动位置）
   };
 
   /* ---------------- 工具函数 ---------------- */
@@ -449,20 +450,24 @@
       document.head.appendChild(s);
     });
   }
-  async function ensureAmap(){
-    if(state.amapReady) return true;
-    if(!state.settings.amapKey){
-      return false;
-    }
-    try{
-      await loadAmapScript(state.settings.amapKey, state.settings.amapSecurity);
-      state.geocoder = new window.AMap.Geocoder({ city:"北京", citylimit:false });
-      state.amapReady = true;
-      return true;
-    }catch(e){
-      toast("高德地图加载失败：" + e.message, "err");
-      return false;
-    }
+  var amapLoading = null;   // 共享加载 Promise：并发调用只注入一次 SDK
+  function ensureAmap(){
+    if(state.amapReady) return Promise.resolve(true);
+    if(!state.settings.amapKey) return Promise.resolve(false);
+    if(amapLoading) return amapLoading;
+    amapLoading = loadAmapScript(state.settings.amapKey, state.settings.amapSecurity)
+      .then(function(){
+        state.geocoder = new window.AMap.Geocoder({ city:"北京", citylimit:false });
+        state.amapReady = true;
+        amapLoading = null;
+        return true;
+      })
+      .catch(function(e){
+        amapLoading = null;
+        toast("高德地图加载失败：" + e.message, "err");
+        return false;
+      });
+    return amapLoading;
   }
   function initMap(){
     var el = $("amap-container");
@@ -553,6 +558,7 @@
     });
     state.searchJustRan = false;   // 本次搜索的跳动只播放一次
     updateMapCount();
+    renderUnlocated();             // 同步「待编码单位」列表（无坐标的标记不在地图上）
   }
   function updateMapCount(){
     var cnt = Object.keys(state.markers).length;
@@ -575,6 +581,7 @@
     }
     blinkTarget();
     updateSidePanel();
+    if(rec.lng == null) toast("「"+(rec.name||"该单位")+"」尚未编码，地图上暂无点位——可点右侧「📍 手动定位」在地图上点选它的位置", "warn");
   }
   // 目标标记闪烁约 3 秒（动画类自动移除；红色高亮 .target 持续保留）
   function blinkTarget(){
@@ -721,15 +728,17 @@
       (rec.remark ? '<div class="tc-row tc-remark"><b>备注：</b>'+esc(rec.remark)+'</div>'
                   : '<div class="tc-row"><b>备注：</b><span style="color:#9aa1ae">未填写</span></div>')+
       (rec.lng != null ? '<div class="tc-row"><b>坐标：</b>'+rec.lng.toFixed(6)+', '+rec.lat.toFixed(6)+'</div>'
-                       : '<div class="tc-row">坐标：暂无（未编码）</div>')+
+                       : '<div class="tc-row"><b>坐标：</b><span style="color:#b45309">未编码（地图上无点位）</span></div>')+
       '<div class="tc-actions">'+
-        '<button id="tc-edit" class="btn sm primary">✏️ 编辑</button>'+
+        (rec.lng == null ? '<button id="tc-locate" class="btn sm primary">📍 手动定位</button>' : '')+
+        '<button id="tc-edit" class="btn sm'+ (rec.lng == null ? '' : ' primary') +'">✏️ 编辑</button>'+
         '<button id="tc-detail" class="btn sm">单位详情</button>'+
         '<button id="tc-clear" class="btn sm">清除目标</button>'+
       '</div>';
     var editBtn = $("tc-edit");   if(editBtn)   editBtn.addEventListener("click", function(){ openDetail(rec._uid); });
     var detBtn  = $("tc-detail"); if(detBtn)    detBtn.addEventListener("click", function(){ openDetail(rec._uid); });
     var clrBtn  = $("tc-clear");  if(clrBtn)    clrBtn.addEventListener("click", function(){ clearTarget(); });
+    var locBtn  = $("tc-locate"); if(locBtn)    locBtn.addEventListener("click", function(){ startManualLocate(rec._uid); });
     var nb = $("nearby-block"); if(nb) nb.style.display = "flex";
     var r = state.targetRadius || 200;
     var cus = $("nearby-custom");
@@ -742,7 +751,7 @@
     state.pickMode = true;
     state.pickTarget = null;
     var el = $("amap-container"); if(el) el.classList.add("pick-on");
-    showMapHint("手动选点模式：请先在地图上点击要更新的「单位标记」（蓝色圆点），选中后再点击地图任意位置设置新地址（按 Esc 取消）");
+    showMapHint("手动选点模式：请先在右侧「待编码单位」点「📍 定位」选择要处理的单位（或直接点击地图上的蓝色圆点），再点击地图上的实际位置即可写入坐标（Esc 取消）");
   }
   function exitPickMode(){
     state.pickMode = false;
@@ -754,7 +763,91 @@
     var rec = state.data.find(function(r){ return r._uid === uid; });
     if(!rec) return;
     state.pickTarget = uid;
-    showMapHint("已选择「"+rec.name+"」：请在地图上点击任意位置以更新其地址与坐标（Esc 取消）");
+    showMapHint("已选择「"+rec.name+"」：请在地图上点击它的实际位置以写入坐标（原地址保留，可在详情里修改；Esc 取消）");
+  }
+  // 从「待编码单位」列表 / 详情弹窗发起手动定位：不依赖地图上是否已有标记
+  function startManualLocate(uid){
+    var rec = state.data.find(function(r){ return r._uid === uid; });
+    if(!rec){ toast("未找到该单位", "err"); return; }
+    var begin = function(){
+      state.pickMode = true;
+      state.pickTarget = uid;
+      var el = $("amap-container"); if(el) el.classList.add("pick-on");
+      showMapHint("已选择「"+(rec.name||"该单位")+"」：请在地图上点击它的实际位置以写入坐标（原地址保留；Esc 取消）");
+      toast("请在地图上点击「"+(rec.name||"该单位")+"」的实际位置", "ok");
+      // 有地址时先按地址飞到大致的点，方便用户直接微调（不写入数据）
+      if(rec.address && state.geocoder){
+        geocodeOne(rec).then(function(g){
+          if(!g || !state.amap || !state.pickMode || state.pickTarget !== uid) return;
+          try{ state.amap.setZoomAndCenter(17, [g.lng, g.lat]); }
+          catch(e){ try{ state.amap.setCenter([g.lng, g.lat]); }catch(e2){} }
+          showMapHint("已按地址定位到大致位置：「"+(rec.name||"该单位")+"」——请点击它的实际位置写入坐标（原地址保留；Esc 取消）");
+        });
+      }
+    };
+    if(state.view !== "map") switchView("map");   // 自动切到地图界面
+    if(state.amapReady){ begin(); return; }
+    ensureAmap().then(function(ok){
+      if(!ok){ toast("高德地图未就绪，请先在「设置界面」配置地图 Key", "warn"); return; }
+      initMap();
+      begin();
+    });
+  }
+  // 待编码单位列表：无坐标 → 地图上没有标记，故在此集中提供手动定位 / 单条自动编码
+  function renderUnlocated(){
+    var block = $("unloc-block"), list = $("unloc-list");
+    if(!block || !list) return;
+    var miss = state.data.filter(function(r){ return r.lng==null || r.lat==null; });
+    var cnt = $("unloc-count"); if(cnt) cnt.textContent = miss.length + " 条";
+    if(!miss.length){
+      block.style.display = "none";
+      if(state._unlocSig !== ""){ state._unlocSig = ""; list.innerHTML = ""; updateMapNote(); }
+      return;
+    }
+    var sig = miss.map(function(r){ return r._uid; }).join(",");
+    block.style.display = "flex";
+    if(sig === state._unlocSig) return;      // 集合未变则不重建，避免列表滚动位置被重置
+    state._unlocSig = sig;
+    list.innerHTML = miss.slice(0, 300).map(function(r){
+      return '<div class="nearby-item unloc-item" data-uid="'+r._uid+'">'+
+        '<div class="ni-name">'+esc(r.name || "(未命名单位)")+'</div>'+
+        '<div class="ni-sub">'+(r.license ? esc(r.license)+' ｜ ' : '')+esc(r.address || "无地址")+'</div>'+
+        '<div class="unloc-actions">'+
+          '<button class="btn sm primary" data-locate="'+r._uid+'">📍 定位</button>'+
+          (r.address ? '<button class="btn sm" data-geo="'+r._uid+'">自动编码</button>' : '')+
+        '</div>'+
+      '</div>';
+    }).join("") + (miss.length > 300 ? '<div class="nearby-empty">仅显示前 300 条，请用搜索或自动编码处理其余记录。</div>' : '');
+    updateMapNote();
+  }
+  // 地图左下角提示条：随「待编码」数量变化实时更新
+  function updateMapNote(){
+    if(!state.settings.amapKey || !state.amapReady) return;   // 未配置 / 未就绪时由 renderMapView 统一提示
+    var missing = state.data.filter(function(r){ return r.lng==null || r.lat==null; });
+    if(missing.length){
+      setMapNote('💡 ' + missing.length + ' 条单位尚无坐标',
+        '这些单位在地图上没有点位。请在右侧「待编码单位」里点「📍 定位」，然后在地图上点一下它的实际位置即可写入坐标（原地址会保留）；也可以点「自动编码」或上方「🔄 地理编码全部」按地址批量查坐标。');
+    } else {
+      setMapNote("", null);
+    }
+  }
+  // 单条自动编码（按地址查坐标）
+  function geocodeSingle(uid){
+    if(!state.amapReady){ toast("请先配置高德地图密钥", "warn"); return; }
+    var rec = state.data.find(function(r){ return r._uid === uid; });
+    if(!rec) return;
+    if(!rec.address){ toast("该单位没有地址，无法自动编码，请用「📍 定位」手动点选", "warn"); return; }
+    toast("正在自动编码：「"+(rec.name||"")+"」…", "ok");
+    geocodeOne(rec).then(function(g){
+      if(g){
+        rec.lng = g.lng; rec.lat = g.lat;
+        commit({silent:true});
+        refreshIfMap();
+        toast("已自动编码：「"+(rec.name||"")+"」", "ok");
+      } else {
+        toast("自动编码失败，请用「📍 定位」手动点选", "warn");
+      }
+    });
   }
   // 点击空白地图区域 / 距离圈：取消目标选中（清空红色高亮、距离圆与右侧面板）
   function clearTarget(){
@@ -789,7 +882,10 @@
   }
   function onMapClick(e){
     if(state.pickMode){
-      if(!state.pickTarget) return;   // 需先点选单位标记
+      if(!state.pickTarget){
+        toast("请先在右侧「待编码单位」点「📍 定位」选择要处理的单位（或点击地图上的蓝色圆点）", "warn");
+        return;
+      }
       var lng = e.lnglat.getLng(), lat = e.lnglat.getLat();
       var rec = state.data.find(function(r){ return r._uid === state.pickTarget; });
       exitPickMode();
@@ -896,18 +992,20 @@
   }
   function reverseGeocode(lng, lat, rec){
     if(!state.geocoder){ rec.lng=lng; rec.lat=lat; commit({silent:true}); refreshIfMap(); return; }
+    var keepAddr = (rec.address || "").trim();   // 原地址（来自台账/Excel）优先保留，避免被反查结果覆盖
     state.geocoder.getAddress([lng, lat], function(status, result){
       var addr = "";
       if(status === "complete" && result.regeocode){
         addr = result.regeocode.formattedAddress;
       }
-      rec.address = addr;
+      if(!keepAddr) rec.address = addr;           // 只有原本没有地址时才用反查地址补全
       rec.lng = lng; rec.lat = lat;
       var dAddr = $("detail-address");
-      if(dAddr) dAddr.textContent = addr || (lng.toFixed(6)+", "+lat.toFixed(6));
+      if(dAddr) dAddr.textContent = rec.address || (lng.toFixed(6)+", "+lat.toFixed(6));
       commit({silent:true});
       refreshIfMap();
-      toast("已更新地址与坐标：" + (addr || (lng.toFixed(6)+", "+lat.toFixed(6))), "ok");
+      toast("已写入坐标：" + lng.toFixed(6) + ", " + lat.toFixed(6) +
+            (keepAddr ? "（原地址已保留）" : (addr ? "（地址已补全为：" + addr + "）" : "")), "ok");
     });
   }
 
@@ -962,11 +1060,14 @@
         '<div class="kv"><span>坐标</span><b>'+esc(coordText(rec))+'</b></div>' +
         '<div class="kv"><span>备注</span><b class="remark-text">'+esc(rec.remark||"")+'</b></div>' +
         '<div class="actions">' +
+          '<button class="btn" id="detail-locate">📍 在地图上手动定位</button>' +
           '<button class="btn primary" id="detail-edit">编辑</button>' +
         '</div>' +
       '</div>';
     showModal(html);
     $("detail-edit").onclick = function(){ openEdit(rec._uid); };
+    var locBtn = $("detail-locate");
+    if(locBtn) locBtn.onclick = function(){ closeModal(); startManualLocate(rec._uid); };
   }
 
   /* ---------------- 编辑弹窗（可修改全部字段） ---------------- */
@@ -1327,14 +1428,8 @@
         // 容器尺寸可能随布局变化（如从 block 改为 flex 子项），主动重算地图尺寸，避免空白
         try { if(state.amap && state.amap.resize) state.amap.resize(); } catch(e){}
         // 坐标已持久化（localStorage + Supabase），打开地图不再重新编码；
-        // 仅提示尚未编码的地址，由用户点「地理编码全部」或手动选点来完成。
-        var missing = state.data.filter(function(r){ return (r.lng==null || r.lat==null) && r.address; });
-        if(missing.length){
-          setMapNote('💡 ' + missing.length + ' 条地址待编码',
-            '已编码的坐标已记住、不会重复编码。点上方「🔄 地理编码全部」即可生成地图点位（手动地图上选点也会自动记录坐标）。');
-        } else {
-          setMapNote("", null);
-        }
+        // 未编码的记录地图上没有点位，统一在右侧「待编码单位」里手动定位或自动编码。
+        updateMapNote();
       } else {
         setMapNote('⚠️ 地图加载失败', '高德地图加载失败，请检查密钥与网络。');
       }
@@ -1508,6 +1603,13 @@
     $("nearby-list").addEventListener("dblclick", function(e){
       var it = e.target.closest(".nearby-item"); if(!it) return;
       nearbyItemDouble(it.getAttribute("data-uid"));
+    });
+    // 待编码单位：📍 定位（手动点选）/ 自动编码（按地址查坐标）
+    $("unloc-list").addEventListener("click", function(e){
+      var loc = e.target.closest("[data-locate]");
+      if(loc){ startManualLocate(loc.getAttribute("data-locate")); return; }
+      var geo = e.target.closest("[data-geo]");
+      if(geo){ geocodeSingle(geo.getAttribute("data-geo")); return; }
     });
 
     // 设置
