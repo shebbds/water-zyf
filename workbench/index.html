@@ -193,6 +193,19 @@
   .toast.show{opacity:1;transform:none}
   .toast.ok{background:#15803d}.toast.warn{background:#b45309}.toast.err{background:#b91c1c}
   .sec-title{font-size:13px;font-weight:700;color:var(--muted);margin:18px 0 10px}
+  /* 云端异常提示条（如 Supabase 的 units 表被重新开启 RLS：读不到、也存不进） */
+  .cloud-alert{max-width:1600px;margin:14px auto -8px;padding:13px 16px;border-radius:12px;
+    background:#fdf4f2;border:1px solid #f3cfc9;color:#8c2f24;font-size:13px;line-height:1.7;
+    display:flex;gap:14px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+  .cloud-alert.warn{background:#fff8ec;border-color:#f3e2bd;color:#8a5a00}
+  .cloud-alert b{color:#7f1d1d}
+  .cloud-alert.warn b{color:#8a5a00}
+  .cloud-alert .ca-body{flex:1;min-width:260px}
+  .cloud-alert code{background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:6px;
+    padding:2px 7px;font-family:ui-monospace,Consolas,monospace;font-size:12px;
+    display:inline-block;margin:3px 0;word-break:break-all;user-select:all}
+  .cloud-alert .ca-actions{display:flex;gap:8px;flex:none;align-items:center;padding-top:2px}
+  @media(max-width:600px){ .cloud-alert{margin:12px 12px -6px} }
   /* 地图搜索框 + 候选项 */
   .search-wrap{position:relative}
   .suggest{position:absolute;top:42px;left:0;right:0;z-index:30;background:#fff;border:1px solid var(--line);
@@ -261,6 +274,8 @@
     <span class="stat" id="stat">共 0 条</span>
   </div>
 </header>
+
+<div id="cloud-alert" class="cloud-alert" style="display:none"></div>
 
 <main>
   <!-- 页面 1：首页 -->
@@ -447,6 +462,7 @@
           </select>
         </div>
         <div class="actions">
+          <button class="btn" id="sb-check">🔍 检查云端连接</button>
           <button class="btn" id="sb-pull">从云端拉取</button>
           <button class="btn" id="sb-push">上传到云端</button>
           <button class="btn primary" id="set-save">保存设置</button>
@@ -459,7 +475,7 @@
 
 <div id="toast-wrap"></div>
 
-<script src="seed.js?v=20260919a"></script>
-<script src="app.js?v=20260919a"></script>
+<script src="seed.js?v=20261003a"></script>
+<script src="app.js?v=20261003a"></script>
 </body>
 </html>

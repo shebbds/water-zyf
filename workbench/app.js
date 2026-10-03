@@ -163,6 +163,60 @@
     if(sync !== false) scheduleSync();
   }
 
+  /* ---------------- 云端异常提示条 ----------------
+   * 本项目最常见的故障：Supabase 的 units 表被（重新）开启 RLS 且无策略
+   * → 读返回 []（页面看起来“一条数据都没有”）、写报 42501。
+   * 光靠 toast 一闪而过用户反应不过来，故做成常驻提示条 + 可复制 SQL。
+   */
+  var RLS_SQL = "alter table units disable row level security;";
+  var RLS_POLICY_SQL = 'create policy "anon_all" on units for all to anon using (true) with check (true);';
+  function isRlsError(msg){
+    return /row-level security|42501|violates row-level/i.test(String(msg||""));
+  }
+  function showCloudAlert(level, html){
+    var box = $("cloud-alert");
+    if(!box) return;
+    box.className = "cloud-alert" + (level === "warn" ? " warn" : "");
+    box.innerHTML = '<div class="ca-body">'+html+'</div>' +
+      '<div class="ca-actions">' +
+        '<button class="btn sm" id="ca-copy">复制 SQL</button>' +
+        '<button class="btn sm" id="ca-close">知道了</button>' +
+      '</div>';
+    box.style.display = "flex";
+    var cp = $("ca-copy");
+    if(cp) cp.addEventListener("click", function(){
+      var txt = RLS_SQL;
+      try{
+        if(navigator.clipboard && navigator.clipboard.writeText){
+          navigator.clipboard.writeText(txt);
+        } else {
+          var ta = document.createElement("textarea");
+          ta.value = txt; document.body.appendChild(ta); ta.select();
+          document.execCommand("copy"); ta.remove();
+        }
+        toast("SQL 已复制，去 Supabase 的 SQL Editor 粘贴执行", "ok");
+      }catch(e){ toast("复制失败，请手动选中 SQL 复制", "warn"); }
+    });
+    var cl = $("ca-close");
+    if(cl) cl.addEventListener("click", function(){ hideCloudAlert(); });
+  }
+  function hideCloudAlert(){
+    var box = $("cloud-alert");
+    if(box){ box.style.display = "none"; box.innerHTML = ""; }
+  }
+  // RLS 被开启（读不到 + 存不进）——本项目头号故障，给出可直接复制的修复 SQL
+  function showRlsAlert(detail){
+    showCloudAlert("err",
+      '<b>⚠️ 云端数据库拒绝访问（Supabase 开启了 RLS）</b><br>' +
+      '症状：云端读不到任何记录（页面看起来“没有数据”），新增/修改也存不进云端。' +
+      '这通常是 Supabase 控制台里 <b>units</b> 表被重新开启了 Row Level Security 且没有策略。<br>' +
+      '修复：打开 Supabase → SQL Editor，执行下面任意一条（第一条最简单）：<br>' +
+      '<code>'+RLS_SQL+'</code><br>' +
+      '<code>'+RLS_POLICY_SQL+'</code><br>' +
+      '执行后回到本页按 <b>Ctrl+Shift+R</b> 刷新即可。' +
+      (detail ? '<br><span style="opacity:.75">云端返回：'+esc(detail)+'</span>' : ''));
+  }
+
   /* ---------------- 云同步（Supabase） ---------------- */
   var sbClient = null;
   function getSb(){
@@ -218,9 +272,9 @@
     var now = Date.now();
     if(_syncErrAt[key] && now - _syncErrAt[key] < 60000) return;
     _syncErrAt[key] = now;
-    var extra = /row-level security|42501/i.test(msg)
-      ? " —— 请在 Supabase 执行：alter table units disable row level security;"
-      : "";
+    var rls = isRlsError(msg);
+    if(rls) showRlsAlert(msg);          // RLS 属于“必须让用户看到并修”的故障 → 常驻提示条
+    var extra = rls ? " —— 请在 Supabase 执行：alter table units disable row level security;" : "";
     toast("云端保存失败（数据仅存本地）：" + msg + extra, "err");
   }
   async function pushCloud(silent){
@@ -238,6 +292,7 @@
       }
     }catch(e){
       var m = e.message || String(e);
+      if(isRlsError(m)) showRlsAlert(m);
       if(!silent) toast("上传失败：" + m, "err");
       else warnSyncError(m);
     }
@@ -380,7 +435,8 @@
     try{
       var res = await c.from(state.settings.supabaseTable).select("*");
       if(res.error) throw res.error;
-      var rows = res.data || [];
+      // 防御：过滤掉「检查云端连接」留下的探针记录（正常情况下已即时删除）
+      var rows = (res.data || []).filter(function(d){ return String(d.license||"").indexOf("__probe") !== 0; });
       if(opts.merge === true){
         // 合并模式：以 synced 标记为据，区分“本地新增”与“别处已删除”
         var cloudLicenses = {};
@@ -432,8 +488,20 @@
       saveDataLocal();
       renderCurrentView();
       if(rows.length) toast("已从云端同步 "+rows.length+" 条"+(opts.merge?"（已与本地合并）":""), "ok");
+      // 云端空 + 本地也空 → 页面会“一条数据都没有”。若云端原本有数据，
+      // 最常见的原因就是 units 表被重新开启了 RLS（读返回 [] 而不是报错）。
+      if(!rows.length && !state.data.length){
+        showCloudAlert("warn",
+          '<b>云端返回 0 条记录，本地也没有数据，所以页面是空的。</b><br>' +
+          '如果你确认云端原本存有数据，通常是 <b>units</b> 表被重新开启了 RLS（症状：读不到、也存不进）。' +
+          '可到「设置界面」点 <b>🔍 检查云端连接</b> 确认；或直接在 Supabase 的 SQL Editor 执行：<br>' +
+          '<code>'+RLS_SQL+'</code><br>' +
+          '执行后按 <b>Ctrl+Shift+R</b> 刷新即可。若你只是首次使用，可先在「单位台账」导入 Excel。');
+      }
     }catch(e){
-      if(!opts.quietError && !opts.silent) toast("拉取失败：" + (e.message||e), "err");
+      var m = e.message || String(e);
+      if(isRlsError(m)) showRlsAlert(m);
+      if(!opts.quietError && !opts.silent) toast("拉取失败：" + m, "err");
     }
   }
 
@@ -1471,6 +1539,45 @@
     }
   }
 
+  /* ---------------- 云端连接自检 ----------------
+   * 读一次 + 写一条探针（__probe__，随即删除）来区分三种状态：
+   * ① 可读可写 = 正常；② 写入被 42501 拒绝 = RLS 被开启（本项目头号故障）；
+   * ③ 其它网络/配置错误。探针记录即使残留也不会进入界面（pullCloud 已过滤）。
+   */
+  async function checkCloud(){
+    var st = $("set-status");
+    var c = getSb();
+    if(!c){
+      if(st) st.textContent = "未配置 Supabase（缺少 项目 URL / Anon Key）";
+      toast("请先填写 Supabase 配置并保存", "warn");
+      return;
+    }
+    var table = state.settings.supabaseTable || "units";
+    if(st) st.textContent = "正在检查云端连接…";
+    try{
+      var rd = await c.from(table).select("license").limit(5);
+      if(rd.error) throw rd.error;
+      var readN = (rd.data || []).length;
+      var probe = "__probe__";
+      var wr = await c.from(table).upsert([{ license: probe, id:"0", name:"__probe__" }], { onConflict:"license" });
+      if(wr.error) throw wr.error;                            // RLS 拒绝会在 catch 里识别为 42501
+      await c.from(table).delete().in("license", [probe]);   // 清理探针
+      hideCloudAlert();
+      if(st) st.textContent = "✅ 云端连接正常：可读可写" +
+        (readN ? "（读取到 " + readN + " 条样本）" : "，但云端当前没有任何记录（可点「上传到云端」把本地数据传上去）");
+      toast("云端连接正常", "ok");
+    }catch(e){
+      var m = e.message || String(e);
+      if(isRlsError(m)){
+        showRlsAlert(m);
+        if(st) st.textContent = "❌ 云端写入被 RLS 拒绝（42501）：请按页面顶部提示执行 SQL 修复";
+      } else {
+        if(st) st.textContent = "❌ 云端连接失败：" + m;
+        toast("云端连接失败：" + m, "err");
+      }
+    }
+  }
+
   /* ---------------- 视图切换 ---------------- */
   function switchView(v){
     if(v !== "map" && state.pickMode) exitPickMode();   // 离开地图视图时退出选点模式
@@ -1484,6 +1591,7 @@
     else if(v === "ledger") renderLedger();
     else if(v === "map") renderMapView();
     else if(v === "settings") fillSettings();
+    updateStat();   // 顶部「共 N 条」：任何视图重绘后都刷新，避免云同步/导入后计数不更新
   }
   function renderCurrentView(){ switchView(state.view); }
 
@@ -1614,6 +1722,7 @@
 
     // 设置
     $("set-save").addEventListener("click", saveSettings);
+    if($("sb-check")) $("sb-check").addEventListener("click", checkCloud);
     $("sb-push").addEventListener("click", function(){ pushCloud(false); });
     $("sb-pull").addEventListener("click", function(){
       if(!confirm("从云端拉取将用云端数据覆盖本地全部记录，确定继续？")) return;
