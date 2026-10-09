@@ -37,6 +37,10 @@
   .rt-badge.connecting::before{background:#f5a524;animation:rtpulse 1s infinite}
   .rt-badge.error{color:#c0392b;border-color:#f3cfc9;background:#fdf4f2}
   .rt-badge.error::before{background:#e5484d}
+  /* 当前连接的云端地址：多设备不一致时一眼看出是否连错库 */
+  .sb-current{margin:10px 0 2px;font-size:12px;color:#4a5262;background:#f6f7f9;
+    border:1px solid #e6e9ef;border-radius:8px;padding:8px 10px;word-break:break-all}
+  .sb-current.warn{color:#8a5a00;background:#fff8e6;border-color:#f3d99b}
   @keyframes rtpulse{0%,100%{opacity:1}50%{opacity:.35}}
   main{max-width:1600px;margin:0 auto;padding:22px}
   .view{display:none}
@@ -461,10 +465,13 @@
             <option value="0">关闭</option>
           </select>
         </div>
+        <p class="sb-current" id="set-sb-current"></p>
         <div class="actions">
           <button class="btn" id="sb-check">🔍 检查云端连接</button>
+          <button class="btn" id="sb-rt-check">📡 检查实时同步</button>
           <button class="btn" id="sb-pull">从云端拉取</button>
           <button class="btn" id="sb-push">上传到云端</button>
+          <button class="btn" id="sb-restore">↩️ 恢复内置云端配置</button>
           <button class="btn primary" id="set-save">保存设置</button>
         </div>
         <p class="hint" id="set-status"></p>
@@ -475,7 +482,7 @@
 
 <div id="toast-wrap"></div>
 
-<script src="seed.js?v=20261003a"></script>
-<script src="app.js?v=20261003a"></script>
+<script src="seed.js?v=20261009a"></script>
+<script src="app.js?v=20261009a"></script>
 </body>
 </html>

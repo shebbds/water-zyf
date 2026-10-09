@@ -9,7 +9,15 @@
   var LS_SYNCED = "hp_workbench_synced_v2";
   var LS_SETTINGS = "hp_workbench_settings";
   // 内置默认配置（开箱即用；如需清除请在「设置界面」留空并保存）
+  // cfgVer —— 【云端连接配置版本号】。每次更换 Supabase 项目/密钥/表名都必须 +1。
+  // 原因：loadSettings 里 localStorage 的旧值会覆盖内置默认值，导致“在改配置之前
+  // 打开过本页的设备”永远锁死在旧项目上（本项目真实踩坑：旧库 144 条 / 新库 189 条
+  // 同时存活，各设备读写不同的库 → 表现为“怎么都同步不了、还拉不到数据”）。
+  // 版本号变大时，下面 CFG_KEYS 里的字段会被强制刷成内置值。
+  var CFG_VER = 2;
+  var CFG_KEYS = ["supabaseUrl", "supabaseKey", "supabaseTable"];
   var DEFAULT_SETTINGS = {
+    cfgVer: CFG_VER,
     amapKey:"78b6849a32ebdb6c5db2371b3eb3a732",
     amapSecurity:"c930ea76af4fe01a9ab82e82ca85b3b2",
     supabaseUrl:"https://tchrevgamfaxjmjcqeww.supabase.co",
@@ -17,6 +25,22 @@
     supabaseTable:"units",
     realtime:true            // 多设备实时同步（Supabase Realtime）
   };
+
+  // 第三方库的 CDN 候选源（按顺序回退）。前两个是国内可直连的 jsdelivr 镜像，
+  // 后两个是国际源，任一成功即可；全部失败会在页面上明确告警而不是静默失效。
+  var SUPABASE_CDNS = [
+    "https://cdn.jsdmirror.com/npm/@supabase/supabase-js@2",
+    "https://jsd.cdn.zzko.cn/npm/@supabase/supabase-js@2",
+    "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",
+    "https://unpkg.com/@supabase/supabase-js@2"
+  ];
+  var XLSX_CDNS = [
+    "https://cdn.jsdmirror.com/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+    "https://jsd.cdn.zzko.cn/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+    "https://lib.baomitu.com/xlsx/0.18.5/xlsx.full.min.js",
+    "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+    "https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"
+  ];
 
   var state = {
     data: [],
@@ -116,6 +140,7 @@
     // 内置默认（含密钥）作为基础值，仅当用户在某字段填了非空值时才覆盖；
     // 空值不再清空密钥，避免“先存了部分配置”导致后续密钥无法生效。
     state.settings = Object.assign({}, DEFAULT_SETTINGS);
+    var upgraded = false;
     try{
       var raw = localStorage.getItem(LS_SETTINGS);
       if(raw){
@@ -123,9 +148,23 @@
         Object.keys(parsed).forEach(function(k){
           if(parsed[k] !== undefined && parsed[k] !== "") state.settings[k] = parsed[k];
         });
+        // 【配置升级】本地存的云端配置版本低于内置版本 → 说明内置的 Supabase
+        // 项目/密钥已更换，而本设备还锁在旧项目上（旧项目往往仍然存活，
+        // 于是读写都“看起来正常”，实际和别的设备根本不是一个库）。
+        // 此时强制把 CFG_KEYS 刷成内置值，避免继续静默写进废弃的库。
+        var storedVer = Number(parsed.cfgVer || 0);
+        if(storedVer < CFG_VER){
+          CFG_KEYS.forEach(function(k){ state.settings[k] = DEFAULT_SETTINGS[k]; });
+          state.settings.cfgVer = CFG_VER;
+          upgraded = true;
+        }
       } else {
         // 首次运行：把内置默认（含密钥）固化到本地，真正“配置进去”
         saveSettingsLocal();
+      }
+      if(upgraded){
+        saveSettingsLocal();
+        state._cfgUpgraded = true;   // 供启动后提示用户“云端地址已自动更新”
       }
     }catch(e){}
   }
@@ -138,6 +177,10 @@
       try{ state.data = JSON.parse(raw); }catch(e){ state.data = []; }
     }
     try{ var s = localStorage.getItem(LS_SYNCED); state.synced = s ? JSON.parse(s) : {}; }catch(e){ state.synced = {}; }
+    // 云端配置刚被强制升级（换了 Supabase 项目）→ 旧的 synced 标记属于【另一个库】，
+    // 若保留，合并逻辑会把“新库里没有、但在旧库里同步过”的本地记录当成
+    // “已被其它设备删除”而误删。清空后首次合并退化为纯增量：只增不删，最安全。
+    if(state._cfgUpgraded){ state.synced = {}; saveSynced(); }
     // 仅在【首次安装、从未保存过】（LS_DATA 键不存在）时才载入种子数据；
     // 用户主动删空（LS_DATA = "[]"）时绝不能重置，否则永远删不干净。
     if(!raw){
@@ -170,6 +213,14 @@
    */
   var RLS_SQL = "alter table units disable row level security;";
   var RLS_POLICY_SQL = 'create policy "anon_all" on units for all to anon using (true) with check (true);';
+  // 实时同步（Supabase Realtime）必须把表加入发布，否则订阅会“假装成功”：
+  // phx_join 返回 ok、前端显示已连接，但服务端随后推 system 消息
+  // “Unable to subscribe to changes ... table: units”，变更事件永不投递。
+  var RT_SQL = "alter publication supabase_realtime add table units;";
+  // 自检探针用的许可证号（__probe__ / __rt_probe__），永远不会进入界面
+  function isProbeLicense(l){
+    return /^__/.test(String(l || ""));
+  }
   function isRlsError(msg){
     return /row-level security|42501|violates row-level/i.test(String(msg||""));
   }
@@ -217,12 +268,42 @@
       (detail ? '<br><span style="opacity:.75">云端返回：'+esc(detail)+'</span>' : ''));
   }
 
+  // 云端连接配置被自动升级（换库）后的告知条
+  function showCfgUpgradeNotice(){
+    var host = String(state.settings.supabaseUrl || "")
+      .replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+    showCloudAlert("warn",
+      '<b>ℹ️ 云端地址已自动更新</b><br>' +
+      '本设备保存的云端配置版本较旧（可能仍指向已停用的项目），已自动切换为当前内置项目：<br>' +
+      '<code>' + esc(host) + '</code><br>' +
+      '正在从新云端合并数据（只增不删，本地数据不会被清空）。' +
+      '若发现与其它设备数据不一致，请到「设置界面」点「从云端拉取」。' +
+      '<br><span style="opacity:.75">多设备同步失败最常见的原因有两个：' +
+      '① 各设备连到了不同的云端项目；② 数据表未加入实时发布。</span>');
+  }
+
   /* ---------------- 云同步（Supabase） ---------------- */
-  var sbClient = null;
+  var sbClient = null, sbClientKey = "";
+  // 同步库未就绪 / 未配置 —— 必须区分开，否则“CDN 被拦截导致库没加载”
+  // 会被误报成“请先在设置中配置 Supabase”，把人往错误方向带。
+  function sbUnavailableMsg(){
+    if(!state.settings.supabaseUrl || !state.settings.supabaseKey) return "请先在设置中配置 Supabase";
+    if(!window.supabase) return "同步库尚未加载完成（可能被网络拦截），请稍候或刷新页面重试";
+    return "云端客户端不可用";
+  }
   function getSb(){
     if(!state.settings.supabaseUrl || !state.settings.supabaseKey) return null;
-    if(!sbClient && window.supabase){
+    if(!window.supabase) return null;
+    // 连接参数变化时必须重建客户端：否则在设置里改了云端地址后，
+    // 仍然会继续用旧地址读写（改了等于没改，且极难察觉）。
+    var key = state.settings.supabaseUrl + "|" + state.settings.supabaseKey;
+    if(sbClient && sbClientKey === key) return sbClient;
+    try{
       sbClient = window.supabase.createClient(state.settings.supabaseUrl, state.settings.supabaseKey);
+      sbClientKey = key;
+    }catch(e){
+      sbClient = null; sbClientKey = "";
+      return null;
     }
     return sbClient;
   }
@@ -279,7 +360,7 @@
   }
   async function pushCloud(silent){
     var c = getSb();
-    if(!c){ if(!silent) toast("请先在设置中配置 Supabase", "warn"); return; }
+    if(!c){ if(!silent) toast(sbUnavailableMsg(), "warn"); return; }
     try{
       var rows = toRows();
       var out = await upsertRows(rows);
@@ -339,13 +420,32 @@
       if(out.res.error) throw out.res.error;
       markAllSynced();
 
-      // 2) 删除云端残留：本设备曾同步过(synced)、但本地现已没有的记录
+      // 2) 删除云端残留：只删「本设备曾同步过(state.synced)、但本地现已没有」的记录。
+      //    ⚠️ 绝不能删“本设备从没见过”的云端记录：本设备若因网络/CDN 故障、
+      //    或曾连到另一个云端项目而数据陈旧，一次普通编辑就会把其它设备的
+      //    数据整批删掉（本项目真实风险点，故加下面两道护栏）。
       var localLic = {};
       state.data.forEach(function(r){ if(r.license) localLic[r.license] = true; });
       var rd = await c.from(table).select("license");
       if(rd.error) throw rd.error;
-      var stale = (rd.data || []).map(function(d){ return d.license; })
-                    .filter(function(l){ return l && !localLic[l]; });
+      var cloudLic = (rd.data || []).map(function(d){ return d.license; }).filter(Boolean);
+      var stale = cloudLic.filter(function(l){ return !localLic[l] && state.synced[l]; });
+      // 护栏①：本地一条都没有 → 本地数据异常，绝不动云端
+      // 护栏②：待删量异常大且本地远少于云端 → 典型的“陈旧/连错库设备”特征
+      var guard = "";
+      if(!state.data.length && cloudLic.length){
+        guard = "本地没有任何记录，却要删除云端 " + stale.length + " 条";
+      } else if(stale.length > 10 && state.data.length * 3 < cloudLic.length){
+        guard = "本地仅 " + state.data.length + " 条、云端 " + cloudLic.length +
+                " 条，待删 " + stale.length + " 条异常偏多";
+      }
+      if(guard){
+        stale = [];
+        showCloudAlert("warn",
+          '<b>⚠️ 已阻止一次可能误删云端数据的操作</b><br>' + esc(guard) + '。<br>' +
+          '这通常说明本设备的数据不完整，或者连到了<b>另一个云端项目</b>（新旧库并存时极易发生）。' +
+          '请到「设置界面」确认<b>当前连接的云端地址</b>是否正确，再点「从云端拉取」对齐后再继续操作。');
+      }
       if(stale.length){
         var dd = await c.from(table).delete().in("license", stale);
         if(dd.error) throw dd.error;
@@ -377,16 +477,34 @@
    *   alter publication supabase_realtime add table units;
    */
   var rtChannel = null, rtTimer = null, rtState = "off";   // off|connecting|on|error
+  var rtEventCount = 0;        // 实际收到过多少次变更推送（判断“真连通”而非“假订阅”）
+  var rtLastEventAt = 0;
   function updateRtBadge(){
     var el = $("rt-badge");
     if(!el) return;
-    var txt = rtState === "on" ? "实时同步：已连接"
+    // 关键：SUBSCRIBED 只代表 WebSocket 订阅握手成功，不代表表真的在实时发布里。
+    // 因此「已连接」只在真正收到过变更推送后才敢这么说。
+    var txt = rtState === "on" ? (rtEventCount > 0 ? "实时同步：已连接（已验证）" : "实时同步：已连接（尚未验证）")
             : rtState === "connecting" ? "实时同步：连接中…"
-            : rtState === "error" ? "实时同步：未连接"
+            : rtState === "error" ? "实时同步：未生效"
             : "实时同步：未启用";
     if(state.settings.realtime === false && rtState === "off") txt = "实时同步：已关闭";
     el.textContent = txt;
     el.className = "rt-badge " + rtState;
+    el.title = rtEventCount > 0
+      ? ("已收到 " + rtEventCount + " 次云端变更推送，最近一次 " + new Date(rtLastEventAt).toLocaleTimeString())
+      : "尚未收到任何云端变更推送。若长时间如此，请到「设置界面」点「📡 检查实时同步」。";
+  }
+  // 表未加入 Realtime 发布 —— 订阅“成功”但永远不会推事件，必须显式告知用户
+  function showRealtimeAlert(detail){
+    showCloudAlert("warn",
+      '<b>⚠️ 实时同步未生效（其它设备的改动不会自动出现）</b><br>' +
+      'WebSocket 订阅本身是成功的，但云端没有把 <b>units</b> 表放进实时发布，' +
+      '所以变更事件永远不会推送过来。请到 Supabase → SQL Editor 执行：<br>' +
+      '<code>'+RT_SQL+'</code><br>' +
+      '执行后按 <b>Ctrl+Shift+R</b> 刷新即可。' +
+      '（在此之前，可用「设置界面」的「从云端拉取」手动同步。）' +
+      (detail ? '<br><span style="opacity:.75">云端返回：'+esc(detail)+'</span>' : ''));
   }
   // 收到变更事件后防抖拉取；若本端正上传，稍后再拉，避免与 syncNow 打架
   function scheduleRealtimePull(){
@@ -407,13 +525,26 @@
       rtChannel = c.channel("units-rt-" + Math.random().toString(36).slice(2,8))
         .on("postgres_changes",
             { event:"*", schema:"public", table: state.settings.supabaseTable },
-            function(){ scheduleRealtimePull(); })
+            function(){ rtEventCount++; rtLastEventAt = Date.now(); updateRtBadge(); scheduleRealtimePull(); })
         .subscribe(function(status){
           if(status === "SUBSCRIBED"){ rtState = "on"; }
           else if(status === "CHANNEL_ERROR" || status === "TIMED_OUT"){ rtState = "error"; }
           else if(status === "CLOSED"){ rtState = "off"; }
           updateRtBadge();
         });
+      // 监听服务端 system 消息：表未加入实时发布时，服务端会明确抱怨
+      // “Unable to subscribe to changes with given parameters … table: units”。
+      // 这是唯一能戳穿“订阅成功但收不到事件”的信号，必须捕获并提示。
+      try{
+        rtChannel.on("system", {}, function(msg){
+          var s = "";
+          try{ s = JSON.stringify(msg || {}); }catch(e){ s = String(msg); }
+          if(/Unable to subscribe to changes|check Realtime is enabled/i.test(s)){
+            rtState = "error"; updateRtBadge();
+            showRealtimeAlert("表未加入实时发布");
+          }
+        });
+      }catch(e){}
     }catch(e){
       rtState = "error"; updateRtBadge();
     }
@@ -435,8 +566,8 @@
     try{
       var res = await c.from(state.settings.supabaseTable).select("*");
       if(res.error) throw res.error;
-      // 防御：过滤掉「检查云端连接」留下的探针记录（正常情况下已即时删除）
-      var rows = (res.data || []).filter(function(d){ return String(d.license||"").indexOf("__probe") !== 0; });
+      // 防御：过滤掉「检查云端连接 / 检查实时同步」留下的探针记录（正常情况下已即时删除）
+      var rows = (res.data || []).filter(function(d){ return !isProbeLicense(d.license); });
       if(opts.merge === true){
         // 合并模式：以 synced 标记为据，区分“本地新增”与“别处已删除”
         var cloudLicenses = {};
@@ -1515,6 +1646,17 @@
     $("set-sb-table").value = state.settings.supabaseTable || "units";
     var rt = $("set-sb-realtime");
     if(rt) rt.value = (state.settings.realtime === false) ? "0" : "1";
+    // 当前实际连接的云端地址：多设备不一致时，一眼就能看出某台设备是不是连到了别的库
+    var cur = $("set-sb-current");
+    if(cur){
+      var host = String(state.settings.supabaseUrl || "").replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+      var isBuiltin = (state.settings.supabaseUrl === DEFAULT_SETTINGS.supabaseUrl);
+      cur.textContent = host
+        ? ("当前连接：" + host + " / " + (state.settings.supabaseTable || "units") +
+           (isBuiltin ? "（内置项目）" : "（⚠️ 非内置项目，与其它设备可能不一致）"))
+        : "当前未配置云端";
+      cur.className = "sb-current" + (isBuiltin ? "" : " warn");
+    }
   }
   function saveSettings(){
     var prevAmap = state.settings.amapKey + "|" + state.settings.amapSecurity;
@@ -1526,6 +1668,7 @@
     var rtEl = $("set-sb-realtime");
     var rtOn = rtEl ? (rtEl.value !== "0") : true;
     state.settings.realtime = rtOn;
+    state.settings.cfgVer = CFG_VER;   // 用户手动保存 = 认可当前配置版本，不再被自动覆盖
     saveSettingsLocal();
     // 实时开关/连接参数变化 → 重建订阅
     stopRealtime(); rtState = "off";
@@ -1533,10 +1676,26 @@
     var nowAmap = state.settings.amapKey + "|" + state.settings.amapSecurity;
     $("set-status").textContent = "设置已保存。";
     toast("设置已保存", "ok");
+    fillSettings();
     if(nowAmap !== prevAmap){
       toast("地图密钥已变更，即将重新加载以生效…");
       setTimeout(function(){ location.reload(); }, 900);
     }
+  }
+  // 恢复内置云端配置：设备被旧项目锁死时的“一键回到正确库”
+  function restoreBuiltinCloud(){
+    if(!confirm("将把云端地址/密钥/表名恢复为内置配置：\n\n" + DEFAULT_SETTINGS.supabaseUrl +
+                "\n\n本设备当前未同步到云端的本地改动不会丢失。确定继续？")) return;
+    CFG_KEYS.forEach(function(k){ state.settings[k] = DEFAULT_SETTINGS[k]; });
+    state.settings.cfgVer = CFG_VER;
+    saveSettingsLocal();
+    sbClient = null;              // 丢弃旧客户端，按新地址重建
+    stopRealtime(); rtState = "off";
+    fillSettings();
+    hideCloudAlert();
+    toast("已恢复内置云端配置，正在从云端拉取…", "ok");
+    pullCloud({ confirm:false, merge:true, quietError:false });
+    startRealtime();
   }
 
   /* ---------------- 云端连接自检 ----------------
@@ -1548,8 +1707,8 @@
     var st = $("set-status");
     var c = getSb();
     if(!c){
-      if(st) st.textContent = "未配置 Supabase（缺少 项目 URL / Anon Key）";
-      toast("请先填写 Supabase 配置并保存", "warn");
+      if(st) st.textContent = "❌ " + sbUnavailableMsg();
+      toast(sbUnavailableMsg(), "warn");
       return;
     }
     var table = state.settings.supabaseTable || "units";
@@ -1575,6 +1734,87 @@
         if(st) st.textContent = "❌ 云端连接失败：" + m;
         toast("云端连接失败：" + m, "err");
       }
+    }
+  }
+
+  /* ---------------- 实时同步自检 ----------------
+   * 为什么需要它：Supabase 的订阅握手（phx_join）在“表未加入实时发布”时
+   * 依然返回 ok，前端会显示“已连接”，但事件永远不来 —— 属于典型的假成功。
+   * 本函数用「订阅 → 写探针 → 等事件 → 删探针」的方式做真实投递验证。
+   */
+  async function testRealtime(){
+    var st = $("set-status");
+    var c = getSb();
+    if(!c){
+      if(st) st.textContent = "❌ " + sbUnavailableMsg();
+      toast(sbUnavailableMsg(), "warn");
+      return;
+    }
+    var table = state.settings.supabaseTable || "units";
+    if(st) st.textContent = "正在检查实时同步（写入探针并等待推送，最多 12 秒）…";
+    var probe = "__rt_probe__";
+    var got = false, joined = false, sysMsg = "";
+    var ch = null;
+    try{
+      await new Promise(function(resolve){
+        var done = false;
+        var finish = function(){ if(!done){ done = true; resolve(); } };
+        ch = c.channel("rt-test-" + Math.random().toString(36).slice(2,8))
+          .on("postgres_changes", { event:"*", schema:"public", table: table },
+              function(){ got = true; finish(); })
+          .subscribe(function(status){ if(status === "SUBSCRIBED"){ joined = true; finish(); } });
+        try{
+          ch.on("system", {}, function(msg){
+            var s = "";
+            try{ s = JSON.stringify(msg || {}); }catch(e){ s = String(msg); }
+            if(/Unable to subscribe to changes|check Realtime is enabled/i.test(s)){
+              sysMsg = "表未加入实时发布";
+              finish();
+            }
+          });
+        }catch(e){}
+        setTimeout(finish, 8000);   // 握手超时
+      });
+
+      if(!joined && !sysMsg){
+        throw new Error("订阅未成功（网络或密钥问题）");
+      }
+      if(sysMsg){
+        showRealtimeAlert(sysMsg);
+        if(st) st.textContent = "❌ 实时同步未生效：units 表未加入实时发布。请在 Supabase SQL Editor 执行：" + RT_SQL;
+        if(ch) c.removeChannel(ch);
+        return;
+      }
+
+      // 握手成功 → 真正测一次投递
+      if(st) st.textContent = "订阅成功，正在写入探针并等待推送…";
+      await c.from(table).upsert([{ license: probe, id:"0", name:"__rt_probe__" }], { onConflict:"license" });
+      var waited = 0;
+      while(!got && waited < 10000){
+        await new Promise(function(r){ setTimeout(r, 400); });
+        waited += 400;
+      }
+      await c.from(table).delete().in("license", [probe]);   // 清理探针
+      if(ch) c.removeChannel(ch);
+
+      if(got){
+        rtEventCount++; rtLastEventAt = Date.now();
+        if(rtState !== "on"){ rtState = "on"; }
+        updateRtBadge();
+        hideCloudAlert();
+        if(st) st.textContent = "✅ 实时同步正常：已实测收到云端变更推送";
+        toast("实时同步正常", "ok");
+      } else {
+        rtState = "error"; updateRtBadge();
+        showRealtimeAlert("订阅成功但 10 秒内未收到推送");
+        if(st) st.textContent = "❌ 订阅成功但收不到事件：units 表未加入实时发布。请执行：" + RT_SQL;
+      }
+    }catch(e){
+      var m = e.message || String(e);
+      try{ if(ch) c.removeChannel(ch); }catch(e2){}
+      // 探针清理失败不阻塞；pullCloud 已过滤 __rt_probe__ 前缀
+      if(isRlsError(m)){ showRlsAlert(m); if(st) st.textContent = "❌ 写入被 RLS 拒绝：" + m; }
+      else { if(st) st.textContent = "❌ 实时同步检查失败：" + m; toast("实时同步检查失败：" + m, "err"); }
     }
   }
 
@@ -1723,33 +1963,77 @@
     // 设置
     $("set-save").addEventListener("click", saveSettings);
     if($("sb-check")) $("sb-check").addEventListener("click", checkCloud);
+    if($("sb-rt-check")) $("sb-rt-check").addEventListener("click", testRealtime);
+    if($("sb-restore")) $("sb-restore").addEventListener("click", restoreBuiltinCloud);
     $("sb-push").addEventListener("click", function(){ pushCloud(false); });
     $("sb-pull").addEventListener("click", function(){
       if(!confirm("从云端拉取将用云端数据覆盖本地全部记录，确定继续？")) return;
-      pullCloud();
+      pullCloud({ confirm:false });   // 已确认过，避免 pullCloud 内部再次弹确认框
     });
 
-    // Supabase 库加载（CDN）
+    // 第三方库加载（多 CDN 回退）
+    // 背景：原来只从 cdn.jsdelivr.net 单源加载，且没写 onerror。国内网络下
+    // jsdelivr 时常被拦截 → 脚本静默失败 → 自动拉取和实时同步全都不执行，
+    // 而界面毫无提示（甚至误报成“请先在设置中配置 Supabase”）。
     var autoPulled = false;
-    var sb = document.createElement("script");
-    sb.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
-    sb.onload = function(){
-      // Supabase 就绪后，自动从云端合并一次：打开页面即与云端同步，无需手动拉取
-      if(!autoPulled && state.settings.supabaseUrl && state.settings.supabaseKey){
-        autoPulled = true;
-        pullCloud({ confirm:false, merge:true, quietError:true });
-        startRealtime();          // 开启实时通道：其它设备改动后本页自动更新
+    loadScriptWithFallback(SUPABASE_CDNS, function(){ return !!window.supabase; }, "Supabase 同步库")
+      .then(function(okUrl){
+        if(!okUrl) return;
+        if(!autoPulled && state.settings.supabaseUrl && state.settings.supabaseKey){
+          autoPulled = true;
+          pullCloud({ confirm:false, merge:true, quietError:true });
+          startRealtime();          // 开启实时通道：其它设备改动后本页自动更新
+        }
+      });
+    loadScriptWithFallback(XLSX_CDNS, function(){ return !!window.XLSX; }, "Excel 解析库")
+      .then(function(okUrl){
+        if(!okUrl && $("set-status")) { /* 导入 Excel 时会再提示一次 */ }
+      });
+  }
+  // 依次尝试多个 CDN，返回首个加载成功的 URL；全部失败返回 null 并给出明确告警
+  function loadScriptWithFallback(urls, check, label){
+    return new Promise(function(resolve){
+      var i = 0;
+      function tryNext(){
+        if(i >= urls.length){
+          showCloudAlert("warn",
+            '<b>⚠️ ' + label + '加载失败</b><br>' +
+            '已尝试 ' + urls.length + ' 个 CDN 源都没能加载成功，通常是当前网络拦截了这些域名。' +
+            '这会导致<b>云端同步与实时更新完全不可用</b>（数据仍然安全保存在本机）。<br>' +
+            '建议：① 换一个网络（如手机热点）后按 <b>Ctrl+Shift+R</b> 重试；' +
+            '② 或检查是否有代理/拦截插件屏蔽了 jsdelivr、unpkg 等域名。');
+          resolve(null);
+          return;
+        }
+        var url = urls[i++];
+        var s = document.createElement("script");
+        var settled = false;
+        s.src = url;
+        s.async = true;
+        s.onload = function(){
+          if(settled) return; settled = true;
+          if(check()) resolve(url); else tryNext();   // 加载了但没定义全局 → 继续换源
+        };
+        s.onerror = function(){
+          if(settled) return; settled = true;
+          tryNext();
+        };
+        // 超时保护：某些网络会一直挂着不触发 onload/onerror
+        setTimeout(function(){ if(!settled){ settled = true; tryNext(); } }, 12000);
+        document.head.appendChild(s);
       }
-    };
-    document.head.appendChild(sb);
-    // SheetJS 库加载（CDN）
-    var xls = document.createElement("script");
-    xls.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
-    document.head.appendChild(xls);
+      tryNext();
+    });
   }
 
   /* ---------------- 启动 ---------------- */
-  window.__wb = { closeModal: closeModal, openDetail: openDetail, enterPickMode: enterPickMode, exitPickMode: exitPickMode };
+  // 调试/自检钩子（无头回归测试也依赖这些入口）
+  window.__wb = {
+    closeModal: closeModal, openDetail: openDetail, enterPickMode: enterPickMode, exitPickMode: exitPickMode,
+    state: state, getSb: getSb, syncNow: syncNow, pullCloud: pullCloud, pushCloud: pushCloud,
+    checkCloud: checkCloud, testRealtime: testRealtime, restoreBuiltinCloud: restoreBuiltinCloud,
+    switchView: switchView, DEFAULT_SETTINGS: DEFAULT_SETTINGS, CFG_VER: CFG_VER
+  };
 
   // Esc：取消地图手动选点 / 取消目标选中（清除距离圆与右侧面板）
   document.addEventListener("keydown", function(e){
@@ -1764,6 +2048,8 @@
     bind();
     updateStat();
     switchView("home");
+    updateRtBadge();   // 初始化即如实显示实时同步状态（含“尚未验证”的 title 说明）
+    if(state._cfgUpgraded) showCfgUpgradeNotice();
   }
   if(document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
