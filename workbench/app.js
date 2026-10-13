@@ -646,7 +646,12 @@
   //                  quietError:静默错误提示, silent:静默全部提示 }
   async function pullCloud(opts){
     opts = opts || {};
-    if(_cloudGate){ _cloudPending = _cloudPending || "pull"; return false; }
+    if(_cloudGate){
+      // 已有全量操作在跑：不叠加（否则请求翻倍、卡顿加剧），改为跑完自动补一次
+      _cloudPending = _cloudPending || "pull";
+      if(!opts.silent) toast("云端同步正在进行，稍后会自动拉取", "warn");
+      return false;
+    }
     if(opts.confirm !== false && opts.merge !== true){
       if(!confirm("从云端拉取将用云端数据覆盖本地全部记录，确定继续？")) return false;
     }
