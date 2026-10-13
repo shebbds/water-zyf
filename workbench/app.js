@@ -335,6 +335,22 @@
       };
     });
   }
+  // 判断本地行与云端文档是否已一致（用于跳过“无需变更”的更新）。
+  // 关键：CloudBase 的 doc(_id).update() 在“匹配到但内容没变”时返回 updated:0，
+  // 这和“无权限被拒”不是一回事；直接把它当失败会在整批重新上传时误报“影响 0 条（无权限）”。
+  function sameRow(row, d){
+    if(!d) return false;
+    var f = ["license","id","name","address","valid_from","valid_to","lng","lat","remark","device_type","contact"];
+    for(var i=0;i<f.length;i++){
+      var a = row[f[i]], b = d[f[i]];
+      if(a===null || a===undefined) a = "";
+      if(b===null || b===undefined) b = "";
+      if(typeof a === "number") a = String(a);
+      if(typeof b === "number") b = String(b);
+      if(String(a) !== String(b)) return false;
+    }
+    return true;
+  }
   // 读全量集合（SDK 分页透明：skip 正确映射为 offset），返回文档数组
   async function fetchAll(coll){
     var all = [], offset = 0;
@@ -367,7 +383,14 @@
         var row = rows[i];
         var id = state._cbId[row.license];
         if(id){
-          mustAffect(unwrap(await coll.doc(id).update(row), "更新云端失败 license="+row.license), "更新云端失败");
+          var u = unwrap(await coll.doc(id).update(row), "更新云端失败 license="+row.license);
+          if(u && typeof u.updated === "number" && u.updated === 0){
+            // updated:0 = 匹配到文档但内容没变（无需变更）时也会出现，不能当成“无权限”。
+            // 读回该条与本地比对：一致=成功；不一致=真的没生效（无权限/已被删）→ 报错。
+            var chk = unwrap(await coll.doc(id).get(), "读取云端失败");
+            var d = (chk && chk.data) ? (Array.isArray(chk.data) ? chk.data[0] : chk.data) : null;
+            if(!d || !sameRow(row, d)) throw new Error("更新云端失败 license="+row.license+"：云端未生效（无权限或已被删除），请检查集合安全规则");
+          }
         } else {
           var r = mustAffect(unwrap(await coll.add(row), "写入云端失败 license="+row.license), "写入云端失败");
           if(r.id) state._cbId[row.license] = r.id;
@@ -420,17 +443,21 @@
     _aligning = true;
     try{
       var coll = db.collection(cbColl());
-      // 1) 读取云端全量，建立 license→_id 映射（供后续 upsert/delete 用）
+      // 1) 读取云端全量，建立 license→_id / license→文档 映射（供后续 upsert/delete 用）
       var all = await fetchAll(coll);
-      var cloudById = {}; var cloudLic = {};
-      all.forEach(function(d){ if(d && d.license){ cloudById[d.license]=d._id; cloudLic[d.license]=true; } });
+      var cloudById = {}; var cloudLic = {}; var cloudDoc = {};
+      all.forEach(function(d){ if(d && d.license){ cloudById[d.license]=d._id; cloudLic[d.license]=true; cloudDoc[d.license]=d; } });
       state._cbId = cloudById;
-      // 2) 上传本地全部记录（覆盖新增与编辑）
+      // 2) 上传本地全部记录：与云端一致的直接跳过（否则 doc().update() 对未变更文档返回
+      //    updated:0，会被误判为“无权限”而中断整批同步）；确有变化的才发送更新。
       var rows = toRows();
       for(var i=0;i<rows.length;i++){
         var row = rows[i];
         var id = cloudById[row.license];
-        if(id) mustAffect(unwrap(await coll.doc(id).update(row), "更新云端失败 license="+row.license), "更新云端失败");
+        if(id){
+          if(cloudDoc[row.license] && sameRow(row, cloudDoc[row.license])) continue;
+          mustAffect(unwrap(await coll.doc(id).update(row), "更新云端失败 license="+row.license), "更新云端失败");
+        }
         else { var r = mustAffect(unwrap(await coll.add(row), "写入云端失败 license="+row.license), "写入云端失败"); if(r.id) cloudById[row.license] = r.id; }
       }
       // 3) 删除云端残留：只删「本设备曾同步过(state.synced)、但本地现已没有」的记录
