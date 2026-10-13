@@ -1,6 +1,6 @@
 /* 卫生许可个人业务工作台 — 应用逻辑
  * 数据源：window.SEED_DATA（来自《zyf test.xlsx》）
- * 所有页面共享同一套本地数据（localStorage），并可选同步到 Supabase。
+ * 所有页面共享同一套本地数据（localStorage），并可选同步到腾讯云 CloudBase（文档型数据库）。
  */
 (function(){
   "use strict";
@@ -9,30 +9,28 @@
   var LS_SYNCED = "hp_workbench_synced_v2";
   var LS_SETTINGS = "hp_workbench_settings";
   // 内置默认配置（开箱即用；如需清除请在「设置界面」留空并保存）
-  // cfgVer —— 【云端连接配置版本号】。每次更换 Supabase 项目/密钥/表名都必须 +1。
-  // 原因：loadSettings 里 localStorage 的旧值会覆盖内置默认值，导致“在改配置之前
-  // 打开过本页的设备”永远锁死在旧项目上（本项目真实踩坑：旧库 144 条 / 新库 189 条
-  // 同时存活，各设备读写不同的库 → 表现为“怎么都同步不了、还拉不到数据”）。
+  // cfgVer —— 【云端连接配置版本号】。每次更换 CloudBase 环境/集合时必须 +1。
+  // 原因：localStorage 里的旧值会覆盖内置默认值，导致“在改配置之前打开过本页的设备”
+  // 永远锁死在旧环境上（新旧环境并存 → 表现为“怎么都同步不了、还拉不到数据”）。
   // 版本号变大时，下面 CFG_KEYS 里的字段会被强制刷成内置值。
-  var CFG_VER = 2;
-  var CFG_KEYS = ["supabaseUrl", "supabaseKey", "supabaseTable"];
+  var CFG_VER = 3;
+  var CFG_KEYS = ["cbEnv", "cbColl", "cbRegion", "cbProxy"];
   var DEFAULT_SETTINGS = {
     cfgVer: CFG_VER,
     amapKey:"78b6849a32ebdb6c5db2371b3eb3a732",
     amapSecurity:"c930ea76af4fe01a9ab82e82ca85b3b2",
-    supabaseUrl:"https://tchrevgamfaxjmjcqeww.supabase.co",
-    supabaseKey:"sb_publishable_WDg9H-OEl5ickKrRqQpcfQ_qVFk_oM1",
-    supabaseTable:"units",
-    realtime:true            // 多设备实时同步（Supabase Realtime）
+    cbEnv:"water309-d8g1c3uy074511212",   // CloudBase 环境 ID
+    cbRegion:"ap-shanghai",               // 地域（必须与环境一致）
+    cbColl:"water-zyf",                   // 文档集合名
+    cbProxy:"/cbapi",                     // 同域代理前缀（留空则直连，依赖安全域名白名单）
+    realtime:true                         // 多设备实时同步（CloudBase watch + 轮询兜底）
   };
 
-  // 第三方库的 CDN 候选源（按顺序回退）。前两个是国内可直连的 jsdelivr 镜像，
-  // 后两个是国际源，任一成功即可；全部失败会在页面上明确告警而不是静默失效。
-  var SUPABASE_CDNS = [
-    "https://cdn.jsdmirror.com/npm/@supabase/supabase-js@2",
-    "https://jsd.cdn.zzko.cn/npm/@supabase/supabase-js@2",
-    "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2",
-    "https://unpkg.com/@supabase/supabase-js@2"
+  // 第三方库的 CDN 候选源（按顺序回退）。官方 static.cloudbase.net 为腾讯自建，
+  // 国内直连最稳；jsdelivr 为国际源兜底。任一成功即可；全部失败会在页面明确告警。
+  var CB_SDK_URLS = [
+    "https://static.cloudbase.net/cloudbase-js-sdk/2.28.8/cloudbase.full.js",
+    "https://cdn.jsdelivr.net/npm/@cloudbase/js-sdk@2.28.8/miniprogram_dist/index.js"
   ];
   var XLSX_CDNS = [
     "https://cdn.jsdmirror.com/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
@@ -42,6 +40,37 @@
     "https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"
   ];
 
+  // 同域代理：把 CloudBase 网关请求改写到本站点前缀（如 /cbapi），
+  // 绕过免费版无法配置安全域名导致的 CORS 预检失败。仅在生产域名生效，
+  // localhost / file:// 下不改写（本机已在白名单且无需代理）。
+  var _cbProxyInstalled = false;
+  function installCbProxy(){
+    if(_cbProxyInstalled) return; _cbProxyInstalled = true;
+    function rewrite(u){
+      var env = (state.settings.cbEnv||"").trim();
+      var region = (state.settings.cbRegion||"ap-shanghai").trim();
+      var proxy = (state.settings.cbProxy||"").trim();
+      if(!env || !proxy) return u;
+      if(typeof u !== "string" || !/^https?:\/\//.test(u)) return u;
+      if(location.hostname==="localhost" || location.hostname==="127.0.0.1" || location.protocol==="file:") return u;
+      var host = env + "." + region + ".tcb-api.tencentcloudapi.com";
+      var i = u.indexOf(host);
+      if(i < 0) return u;
+      return location.origin + proxy + u.slice(i + host.length);
+    }
+    var of = window.fetch ? window.fetch.bind(window) : null;
+    if(of){ window.fetch = function(u, o){ return of(rewrite(typeof u==="string"?u:(u&&u.url||u)), o); }; }
+    var ox = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(m, u, a){ return ox.call(this, m, rewrite(u), a); };
+    if(window.WebSocket){
+      var _WS = window.WebSocket;
+      var W = function(url, proto){ return new _WS(rewrite(url), proto); };
+      W.prototype = _WS.prototype;
+      W.CONNECTING=_WS.CONNECTING; W.OPEN=_WS.OPEN; W.CLOSING=_WS.CLOSING; W.CLOSED=_WS.CLOSED;
+      window.WebSocket = W;
+    }
+  }
+
   var state = {
     data: [],
     settings: Object.assign({}, DEFAULT_SETTINGS),
@@ -49,6 +78,7 @@
     homeWindow: 30,
     selected: {},          // uid -> true
     synced: {},           // license -> true：已知存在于云端的许可证号（用于区分“本地新增”与“别处已删除”）
+    _cbId: {},            // license -> CloudBase 文档 _id（upsert/delete 时定位文档，pull 时重建）
     amap: null,
     geocoder: null,
     amapReady: false,
@@ -148,10 +178,10 @@
         Object.keys(parsed).forEach(function(k){
           if(parsed[k] !== undefined && parsed[k] !== "") state.settings[k] = parsed[k];
         });
-        // 【配置升级】本地存的云端配置版本低于内置版本 → 说明内置的 Supabase
-        // 项目/密钥已更换，而本设备还锁在旧项目上（旧项目往往仍然存活，
-        // 于是读写都“看起来正常”，实际和别的设备根本不是一个库）。
-        // 此时强制把 CFG_KEYS 刷成内置值，避免继续静默写进废弃的库。
+        // 【配置升级】本地存的云端配置版本低于内置版本 → 说明内置的 CloudBase
+        // 环境已更换，而本设备还锁在旧环境上（旧环境往往仍然存活，
+        // 于是读写都“看起来正常”，实际和别的设备根本不是一个环境）。
+        // 此时强制把 CFG_KEYS 刷成内置值，避免继续静默写进废弃的环境。
         var storedVer = Number(parsed.cfgVer || 0);
         if(storedVer < CFG_VER){
           CFG_KEYS.forEach(function(k){ state.settings[k] = DEFAULT_SETTINGS[k]; });
@@ -177,8 +207,8 @@
       try{ state.data = JSON.parse(raw); }catch(e){ state.data = []; }
     }
     try{ var s = localStorage.getItem(LS_SYNCED); state.synced = s ? JSON.parse(s) : {}; }catch(e){ state.synced = {}; }
-    // 云端配置刚被强制升级（换了 Supabase 项目）→ 旧的 synced 标记属于【另一个库】，
-    // 若保留，合并逻辑会把“新库里没有、但在旧库里同步过”的本地记录当成
+    // 云端配置刚被强制升级（换了 CloudBase 环境）→ 旧的 synced 标记属于【另一个环境】，
+    // 若保留，合并逻辑会把“新环境里没有、但在旧环境里同步过”的本地记录当成
     // “已被其它设备删除”而误删。清空后首次合并退化为纯增量：只增不删，最安全。
     if(state._cfgUpgraded){ state.synced = {}; saveSynced(); }
     // 仅在【首次安装、从未保存过】（LS_DATA 键不存在）时才载入种子数据；
@@ -207,46 +237,31 @@
   }
 
   /* ---------------- 云端异常提示条 ----------------
-   * 本项目最常见的故障：Supabase 的 units 表被（重新）开启 RLS 且无策略
-   * → 读返回 []（页面看起来“一条数据都没有”）、写报 42501。
-   * 光靠 toast 一闪而过用户反应不过来，故做成常驻提示条 + 可复制 SQL。
+   * CloudBase 的云调用常常“resolve 一个错误对象”而非 reject，且写权限被拒时
+   * 静默返回 {updated:0}/{deleted:0}（无任何 error）。故所有云调用必须过
+   * unwrap（捕获 {code} 错误）与 mustAffect（捕获“影响 0 条”的静默失败）。
    */
-  var RLS_SQL = "alter table units disable row level security;";
-  var RLS_POLICY_SQL = 'create policy "anon_all" on units for all to anon using (true) with check (true);';
-  // 实时同步（Supabase Realtime）必须把表加入发布，否则订阅会“假装成功”：
-  // phx_join 返回 ok、前端显示已连接，但服务端随后推 system 消息
-  // “Unable to subscribe to changes ... table: units”，变更事件永不投递。
-  var RT_SQL = "alter publication supabase_realtime add table units;";
   // 自检探针用的许可证号（__probe__ / __rt_probe__），永远不会进入界面
-  function isProbeLicense(l){
-    return /^__/.test(String(l || ""));
-  }
-  function isRlsError(msg){
-    return /row-level security|42501|violates row-level/i.test(String(msg||""));
-  }
+  function isProbeLicense(l){ return /^__/.test(String(l || "")); }
+
   function showCloudAlert(level, html){
     var box = $("cloud-alert");
     if(!box) return;
     box.className = "cloud-alert" + (level === "warn" ? " warn" : "");
     box.innerHTML = '<div class="ca-body">'+html+'</div>' +
       '<div class="ca-actions">' +
-        '<button class="btn sm" id="ca-copy">复制 SQL</button>' +
+        '<button class="btn sm" id="ca-copy">复制规则</button>' +
         '<button class="btn sm" id="ca-close">知道了</button>' +
       '</div>';
     box.style.display = "flex";
     var cp = $("ca-copy");
     if(cp) cp.addEventListener("click", function(){
-      var txt = RLS_SQL;
+      var txt = '{"read":true,"write":true}';
       try{
-        if(navigator.clipboard && navigator.clipboard.writeText){
-          navigator.clipboard.writeText(txt);
-        } else {
-          var ta = document.createElement("textarea");
-          ta.value = txt; document.body.appendChild(ta); ta.select();
-          document.execCommand("copy"); ta.remove();
-        }
-        toast("SQL 已复制，去 Supabase 的 SQL Editor 粘贴执行", "ok");
-      }catch(e){ toast("复制失败，请手动选中 SQL 复制", "warn"); }
+        if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt); }
+        else { var ta = document.createElement("textarea"); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
+        toast("安全规则已复制：{\"read\":true,\"write\":true}，去 CloudBase 控制台粘贴", "ok");
+      }catch(e){ toast("复制失败，请手动复制", "warn"); }
     });
     var cl = $("ca-close");
     if(cl) cl.addEventListener("click", function(){ hideCloudAlert(); });
@@ -255,141 +270,135 @@
     var box = $("cloud-alert");
     if(box){ box.style.display = "none"; box.innerHTML = ""; }
   }
-  // RLS 被开启（读不到 + 存不进）——本项目头号故障，给出可直接复制的修复 SQL
-  function showRlsAlert(detail){
+  // 云端错误 → 常驻提示条（必须让用户看到并修）
+  function showCloudError(detail){
     showCloudAlert("err",
-      '<b>⚠️ 云端数据库拒绝访问（Supabase 开启了 RLS）</b><br>' +
-      '症状：云端读不到任何记录（页面看起来“没有数据”），新增/修改也存不进云端。' +
-      '这通常是 Supabase 控制台里 <b>units</b> 表被重新开启了 Row Level Security 且没有策略。<br>' +
-      '修复：打开 Supabase → SQL Editor，执行下面任意一条（第一条最简单）：<br>' +
-      '<code>'+RLS_SQL+'</code><br>' +
-      '<code>'+RLS_POLICY_SQL+'</code><br>' +
-      '执行后回到本页按 <b>Ctrl+Shift+R</b> 刷新即可。' +
+      '<b>⚠️ 云端操作失败（数据仅存本地）</b><br>' +
+      '常见原因：集合安全规则未放开写权限、集合不存在、或环境 ID 错误。<br>' +
+      '请确认 CloudBase 控制台 → 文档型数据库 → 集合 <b>'+esc(cbColl())+'</b> 的权限规则为 <code>{"read":true,"write":true}</code>。' +
       (detail ? '<br><span style="opacity:.75">云端返回：'+esc(detail)+'</span>' : ''));
   }
-
-  // 云端连接配置被自动升级（换库）后的告知条
-  function showCfgUpgradeNotice(){
-    var host = String(state.settings.supabaseUrl || "")
-      .replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-    showCloudAlert("warn",
-      '<b>ℹ️ 云端地址已自动更新</b><br>' +
-      '本设备保存的云端配置版本较旧（可能仍指向已停用的项目），已自动切换为当前内置项目：<br>' +
-      '<code>' + esc(host) + '</code><br>' +
-      '正在从新云端合并数据（只增不删，本地数据不会被清空）。' +
-      '若发现与其它设备数据不一致，请到「设置界面」点「从云端拉取」。' +
-      '<br><span style="opacity:.75">多设备同步失败最常见的原因有两个：' +
-      '① 各设备连到了不同的云端项目；② 数据表未加入实时发布。</span>');
+  function isPermissionErr(msg){
+    return /PERMISSION|COLLECTION_NOT_EXIST|DATABASE_PERMISSION|Unauthenticated|无权限/i.test(String(msg||""));
   }
-
-  /* ---------------- 云同步（Supabase） ---------------- */
-  var sbClient = null, sbClientKey = "";
-  // 同步库未就绪 / 未配置 —— 必须区分开，否则“CDN 被拦截导致库没加载”
-  // 会被误报成“请先在设置中配置 Supabase”，把人往错误方向带。
-  function sbUnavailableMsg(){
-    if(!state.settings.supabaseUrl || !state.settings.supabaseKey) return "请先在设置中配置 Supabase";
-    if(!window.supabase) return "同步库尚未加载完成（可能被网络拦截），请稍候或刷新页面重试";
-    return "云端客户端不可用";
-  }
-  function getSb(){
-    if(!state.settings.supabaseUrl || !state.settings.supabaseKey) return null;
-    if(!window.supabase) return null;
-    // 连接参数变化时必须重建客户端：否则在设置里改了云端地址后，
-    // 仍然会继续用旧地址读写（改了等于没改，且极难察觉）。
-    var key = state.settings.supabaseUrl + "|" + state.settings.supabaseKey;
-    if(sbClient && sbClientKey === key) return sbClient;
-    try{
-      sbClient = window.supabase.createClient(state.settings.supabaseUrl, state.settings.supabaseKey);
-      sbClientKey = key;
-    }catch(e){
-      sbClient = null; sbClientKey = "";
-      return null;
+  // CloudBase 错误常以 {code,message} 形式 resolve（而非 reject）
+  function unwrap(res, what){
+    if(res && typeof res === "object" && res.code){
+      var e = new Error((what ? what + "：" : "") + (res.message || res.code));
+      e.code = res.code; throw e;
     }
-    return sbClient;
+    return res;
+  }
+  // 捕获“静默失败”：写被拒时返回 {id:""}/{updated:0}/{deleted:0}，必须当错误处理
+  function mustAffect(res, what){
+    res = unwrap(res, what);
+    if(res && typeof res.id === "string"){ if(!res.id) throw new Error((what||"写入云端")+"：被拒绝（无权限），请检查集合安全规则是否为 read/write 全开"); return res; }
+    if(res && Array.isArray(res.ids)){ if(!res.ids.length) throw new Error((what||"写入云端")+"：被拒绝（无权限），请检查集合安全规则"); return res; }
+    if(res && typeof res.updated === "number" && res.updated === 0) throw new Error((what||"更新云端")+"：影响 0 条（无权限），请检查集合安全规则");
+    if(res && typeof res.deleted === "number" && res.deleted === 0) throw new Error((what||"删除云端")+"：影响 0 条（无权限），请检查集合安全规则");
+    return res;
+  }
+
+  /* ---------------- 云同步（CloudBase） ---------------- */
+  function cbColl(){ return state.settings.cbColl || "water-zyf"; }
+  function cbUnavailableMsg(){
+    if(!state.settings.cbEnv) return "请先在设置中配置 CloudBase 环境 ID";
+    if(!window.cloudbase) return "CloudBase 同步库尚未加载完成（可能被网络拦截），请稍候或刷新页面重试";
+    return "CloudBase 客户端不可用";
+  }
+  var _cbApp = null, _cbDb = null, _cbInit = null;
+  function resetCb(){ _cbApp = null; _cbDb = null; _cbInit = null; state._cbId = {}; }
+  async function ensureCb(){
+    if(_cbDb) return _cbDb;
+    if(!state.settings.cbEnv) throw new Error("未配置 CloudBase 环境 ID");
+    if(!window.cloudbase) throw new Error("CloudBase 同步库未加载");
+    if(_cbInit) return _cbInit;
+    _cbInit = (async function(){
+      var app = window.cloudbase.init({ env: state.settings.cbEnv, region: state.settings.cbRegion || "ap-shanghai" });
+      var auth = app.auth;
+      if(typeof auth === "function"){ try{ auth = auth({ persistence:"local" }); }catch(e){} }
+      await auth.signInAnonymously();
+      _cbApp = app; _cbDb = app.database();
+      return _cbDb;
+    })();
+    try{ return await _cbInit; }
+    catch(e){ _cbInit = null; throw e; }
   }
   function toRows(){
     return state.data.map(function(r){
       return {
         license:r.license, id:r.id, name:r.name, address:r.address,
         valid_from:r.validFrom, valid_to:r.validTo, lng:r.lng, lat:r.lat,
-        remark:r.remark||"", device_type:r.deviceType||"", contact:r.contact||""
+        remark:(r.remark==null?"":r.remark),
+        device_type:(r.deviceType==null?"":r.deviceType),
+        contact:(r.contact==null?"":r.contact)
       };
     });
   }
-  // 解析“云端不存在某列”的报错（PostgREST 42703），返回列名，如 remark / device_type / contact
-  function missingColumn(err){
-    if(!err) return null;
-    var m = String(err.message||"") + " " + String(err.hint||"");
-    var m1 = m.match(/column "([^"]+)" of relation/);        // column "remark" of relation "units" does not exist
-    if(m1) return m1[1];
-    var m2 = m.match(/Could not find the '([^']+)' column/); // Could not find the 'remark' column of 'units'...
-    if(m2) return m2[1];
-    return null;
-  }
-  // 上传行数据：云端缺少某些列时自动剔除该列并重试，保证其余字段仍能同步。
-  // 返回 { res, dropped }，dropped 为被剔除的列名（说明这些字段暂未同步到云端）。
-  async function upsertRows(rows){
-    var c = getSb();
-    var dropped = [], res = null;
-    for(var i=0; i<6; i++){
-      var payload = rows.map(function(r){
-        var x = Object.assign({}, r);
-        dropped.forEach(function(k){ delete x[k]; });
-        return x;
-      });
-      res = await c.from(state.settings.supabaseTable).upsert(payload, { onConflict:"license" });
-      if(!res.error) break;
-      var miss = missingColumn(res.error);
-      if(!miss || dropped.indexOf(miss) >= 0) break;
-      dropped.push(miss);
+  // 读全量集合（SDK 分页透明：skip 正确映射为 offset），返回文档数组
+  async function fetchAll(coll){
+    var all = [], offset = 0;
+    while(true){
+      var page = unwrap(await coll.skip(offset).limit(100).get(), "读取云端失败");
+      var arr = page.data || [];
+      for(var i=0;i<arr.length;i++) all.push(arr[i]);
+      if(arr.length < 100) break;
+      offset += arr.length;
     }
-    return { res: res, dropped: dropped };
+    return all;
   }
-  // 静默自动同步（防抖触发）失败时也要让用户看见，否则“保存失败”会被完全吞掉，
-  // 表现为“导入了、看着有，刷新就没了”却没有任何提示。同一条错误 60 秒内只提示一次。
+  // 静默自动同步失败也要让用户看见，否则“保存失败”被完全吞掉
   var _syncErrAt = {};
   function warnSyncError(msg){
-    var key = String(msg).slice(0, 80);
+    var key = String(msg).slice(0,80);
     var now = Date.now();
-    if(_syncErrAt[key] && now - _syncErrAt[key] < 60000) return;
-    _syncErrAt[key] = now;
-    var rls = isRlsError(msg);
-    if(rls) showRlsAlert(msg);          // RLS 属于“必须让用户看到并修”的故障 → 常驻提示条
-    var extra = rls ? " —— 请在 Supabase 执行：alter table units disable row level security;" : "";
-    toast("云端保存失败（数据仅存本地）：" + msg + extra, "err");
+    if(_syncErrAt[key] && now-_syncErrAt[key]<60000) return;
+    _syncErrAt[key]=now;
+    if(isPermissionErr(msg)) showCloudError(msg);
+    toast("云端保存失败（数据仅存本地）："+msg, "err");
   }
   async function pushCloud(silent){
-    var c = getSb();
-    if(!c){ if(!silent) toast(sbUnavailableMsg(), "warn"); return; }
+    var db;
+    try{ db = await ensureCb(); }catch(e){ if(!silent) toast(cbUnavailableMsg(),"warn"); return; }
     try{
+      var coll = db.collection(cbColl());
       var rows = toRows();
-      var out = await upsertRows(rows);
-      if(out.res.error) throw out.res.error;
-      markAllSynced();
-      if(!silent){
-        toast("已上传 "+rows.length+" 条到云端" +
-              (out.dropped.length ? "（云端缺少列 "+out.dropped.join("、")+"，这些字段未同步）" : ""),
-              out.dropped.length ? "warn" : "ok");
+      for(var i=0;i<rows.length;i++){
+        var row = rows[i];
+        var id = state._cbId[row.license];
+        if(id){
+          mustAffect(unwrap(await coll.doc(id).update(row), "更新云端失败 license="+row.license), "更新云端失败");
+        } else {
+          var r = mustAffect(unwrap(await coll.add(row), "写入云端失败 license="+row.license), "写入云端失败");
+          if(r.id) state._cbId[row.license] = r.id;
+        }
       }
+      markAllSynced();
+      if(!silent) toast("已上传 "+rows.length+" 条到云端", "ok");
     }catch(e){
       var m = e.message || String(e);
-      if(isRlsError(m)) showRlsAlert(m);
-      if(!silent) toast("上传失败：" + m, "err");
+      if(isPermissionErr(m)) showCloudError(m);
+      if(!silent) toast("上传失败："+m, "err");
       else warnSyncError(m);
     }
   }
-  // 云端删除：从 Supabase units 表真正删除，使该记录在云端消失；
-  // 配合 pullCloud 的 synced 标记策略：许可证号仍留在 state.synced 中，
-  // 其它设备拉取时发现“该 license 曾在云端、现云端已无”即把本地副本删除（删除跨设备传播）
   async function deleteCloud(licenses, silent){
-    var c = getSb();
-    if(!c || !licenses || !licenses.length) return;
+    if(!licenses || !licenses.length) return;
+    var db;
+    try{ db = await ensureCb(); }catch(e){ if(!silent) toast(cbUnavailableMsg(),"warn"); return; }
     try{
-      var res = await c.from(state.settings.supabaseTable).delete().in("license", licenses);
-      if(res.error) throw res.error;
+      var coll = db.collection(cbColl());
+      for(var i=0;i<licenses.length;i++){
+        var id = state._cbId[licenses[i]];
+        if(!id){
+          var g = unwrap(await coll.where({license:licenses[i]}).limit(1).get(), "查询云端失败");
+          if(g.data && g.data[0]) id = g.data[0]._id;
+        }
+        if(id){ mustAffect(unwrap(await coll.doc(id).remove(), "删除云端失败"), "删除云端失败"); delete state._cbId[licenses[i]]; }
+      }
       if(!silent) toast("已从云端删除 "+licenses.length+" 条", "ok");
     }catch(e){
-      if(!silent) toast("云端删除失败：" + (e.message||e), "err");
+      if(!silent) toast("云端删除失败："+(e.message||e), "err");
     }
   }
   var syncTimer = null;
@@ -401,66 +410,62 @@
   /* ---------------- 即时全量对齐（台账操作后调用） ----------------
    * 与 scheduleSync（1.5s 防抖、只 upsert）不同：syncNow 立即执行，
    * 且让【云端与本地完全一致】——新增/编辑=upsert，本地已删=从云端删除。
-   * 删除判定直接看「云端有但本地没有」：用户主动删除是明确的意图，必须立即
-   * 反映到云端；多设备间的数据合并由 loadData + pullCloud（自动拉取）保证，
-   * 不会因为本函数被误删。
    */
   var _aligning = false, _alignPending = false;
   async function syncNow(opts){
     opts = opts || {};
-    if(_aligning){ _alignPending = true; return; }   // 已有同步在跑 → 结束后补跑一次
-    var c = getSb();
-    if(!c){ if(!opts.silent) toast("请先在设置中配置 Supabase", "warn"); return; }
+    if(_aligning){ _alignPending = true; return; }
+    var db;
+    try{ db = await ensureCb(); }catch(e){ if(!opts.silent) toast("请先在设置中配置 CloudBase","warn"); return; }
     _aligning = true;
     try{
-      var table = state.settings.supabaseTable;
-      // 1) 上传本地全部记录（覆盖新增与编辑）；云端缺列时自动剔除该列重试
+      var coll = db.collection(cbColl());
+      // 1) 读取云端全量，建立 license→_id 映射（供后续 upsert/delete 用）
+      var all = await fetchAll(coll);
+      var cloudById = {}; var cloudLic = {};
+      all.forEach(function(d){ if(d && d.license){ cloudById[d.license]=d._id; cloudLic[d.license]=true; } });
+      state._cbId = cloudById;
+      // 2) 上传本地全部记录（覆盖新增与编辑）
       var rows = toRows();
-      var out = await upsertRows(rows);
-      if(out.res.error) throw out.res.error;
-      markAllSynced();
-
-      // 2) 删除云端残留：只删「本设备曾同步过(state.synced)、但本地现已没有」的记录。
-      //    ⚠️ 绝不能删“本设备从没见过”的云端记录：本设备若因网络/CDN 故障、
-      //    或曾连到另一个云端项目而数据陈旧，一次普通编辑就会把其它设备的
-      //    数据整批删掉（本项目真实风险点，故加下面两道护栏）。
+      for(var i=0;i<rows.length;i++){
+        var row = rows[i];
+        var id = cloudById[row.license];
+        if(id) mustAffect(unwrap(await coll.doc(id).update(row), "更新云端失败 license="+row.license), "更新云端失败");
+        else { var r = mustAffect(unwrap(await coll.add(row), "写入云端失败 license="+row.license), "写入云端失败"); if(r.id) cloudById[row.license] = r.id; }
+      }
+      // 3) 删除云端残留：只删「本设备曾同步过(state.synced)、但本地现已没有」的记录
       var localLic = {};
       state.data.forEach(function(r){ if(r.license) localLic[r.license] = true; });
-      var rd = await c.from(table).select("license");
-      if(rd.error) throw rd.error;
-      var cloudLic = (rd.data || []).map(function(d){ return d.license; }).filter(Boolean);
-      var stale = cloudLic.filter(function(l){ return !localLic[l] && state.synced[l]; });
-      // 护栏①：本地一条都没有 → 本地数据异常，绝不动云端
-      // 护栏②：待删量异常大且本地远少于云端 → 典型的“陈旧/连错库设备”特征
+      var stale = Object.keys(cloudLic).filter(function(l){ return !localLic[l] && state.synced[l]; });
       var guard = "";
-      if(!state.data.length && cloudLic.length){
+      if(!state.data.length && Object.keys(cloudLic).length){
         guard = "本地没有任何记录，却要删除云端 " + stale.length + " 条";
-      } else if(stale.length > 10 && state.data.length * 3 < cloudLic.length){
-        guard = "本地仅 " + state.data.length + " 条、云端 " + cloudLic.length +
+      } else if(stale.length > 10 && state.data.length*3 < Object.keys(cloudLic).length){
+        guard = "本地仅 " + state.data.length + " 条、云端 " + Object.keys(cloudLic).length +
                 " 条，待删 " + stale.length + " 条异常偏多";
       }
       if(guard){
         stale = [];
         showCloudAlert("warn",
-          '<b>⚠️ 已阻止一次可能误删云端数据的操作</b><br>' + esc(guard) + '。<br>' +
-          '这通常说明本设备的数据不完整，或者连到了<b>另一个云端项目</b>（新旧库并存时极易发生）。' +
-          '请到「设置界面」确认<b>当前连接的云端地址</b>是否正确，再点「从云端拉取」对齐后再继续操作。');
+          '<b>⚠️ 已阻止一次可能误删云端数据的操作</b><br>'+esc(guard)+'。<br>' +
+          '这通常说明本设备的数据不完整，或连到了<b>另一个 CloudBase 环境</b>。' +
+          '请到「设置界面」确认<b>当前连接的环境 ID</b>是否正确，再点「从云端拉取」对齐后再继续。');
       }
       if(stale.length){
-        var dd = await c.from(table).delete().in("license", stale);
-        if(dd.error) throw dd.error;
+        for(var j=0;j<stale.length;j++){
+          var sid = cloudById[stale[j]];
+          if(sid){ mustAffect(unwrap(await coll.doc(sid).remove(), "删除云端失败"), "删除云端失败"); delete state._cbId[stale[j]]; }
+        }
       }
+      markAllSynced();
       if(!opts.silent){
         var extra = [];
         if(stale.length) extra.push("同步删除 " + stale.length + " 条");
-        if(out.dropped.length) extra.push("云端缺列 " + out.dropped.join("、"));
-        toast("已与云端对齐：" + state.data.length + " 条" +
-              (extra.length ? "（" + extra.join("；") + "）" : ""),
-              out.dropped.length ? "warn" : "ok");
+        toast("已与云端对齐：" + state.data.length + " 条" + (extra.length ? "（" + extra.join("；") + "）" : ""), "ok");
       }
     }catch(e){
       var m = e.message || String(e);
-      if(!opts.silent) toast("云端对齐失败：" + m, "err");
+      if(!opts.silent) toast("云端对齐失败："+m, "err");
       else warnSyncError(m);
     }finally{
       _aligning = false;
@@ -470,23 +475,16 @@
   // 台账操作后的统一提交：立即落盘 + 立即与云端对齐
   function commit(opts){ saveDataLocal(); syncNow(opts); }
 
-  /* ---------------- 多设备实时同步（Supabase Realtime） ----------------
-   * 订阅 units 表的 INSERT/UPDATE/DELETE，任何设备改动后本页立即自动合并，
-   * 无需手动刷新。合并沿用 pullCloud(merge) 的规则，不会覆盖本地未同步的新增。
-   * 依赖：Supabase 后台需执行一次
-   *   alter publication supabase_realtime add table units;
-   */
-  var rtChannel = null, rtTimer = null, rtState = "off";   // off|connecting|on|error
+  /* ---------------- 多设备实时同步（CloudBase watch + 轮询兜底） ---------------- */
+  var rtWatcher = null, rtPollTimer = null, rtTimer = null, rtState = "off";   // off|connecting|on|error
   var rtEventCount = 0;        // 实际收到过多少次变更推送（判断“真连通”而非“假订阅”）
   var rtLastEventAt = 0;
   function updateRtBadge(){
     var el = $("rt-badge");
     if(!el) return;
-    // 关键：SUBSCRIBED 只代表 WebSocket 订阅握手成功，不代表表真的在实时发布里。
-    // 因此「已连接」只在真正收到过变更推送后才敢这么说。
     var txt = rtState === "on" ? (rtEventCount > 0 ? "实时同步：已连接（已验证）" : "实时同步：已连接（尚未验证）")
             : rtState === "connecting" ? "实时同步：连接中…"
-            : rtState === "error" ? "实时同步：未生效"
+            : rtState === "error" ? "实时同步：未生效（轮询兜底中）"
             : "实时同步：未启用";
     if(state.settings.realtime === false && rtState === "off") txt = "实时同步：已关闭";
     el.textContent = txt;
@@ -495,15 +493,12 @@
       ? ("已收到 " + rtEventCount + " 次云端变更推送，最近一次 " + new Date(rtLastEventAt).toLocaleTimeString())
       : "尚未收到任何云端变更推送。若长时间如此，请到「设置界面」点「📡 检查实时同步」。";
   }
-  // 表未加入 Realtime 发布 —— 订阅“成功”但永远不会推事件，必须显式告知用户
+  // 实时推送未真正生效（代理可能不支持 WebSocket）→ 提示并依赖轮询兜底
   function showRealtimeAlert(detail){
     showCloudAlert("warn",
-      '<b>⚠️ 实时同步未生效（其它设备的改动不会自动出现）</b><br>' +
-      'WebSocket 订阅本身是成功的，但云端没有把 <b>units</b> 表放进实时发布，' +
-      '所以变更事件永远不会推送过来。请到 Supabase → SQL Editor 执行：<br>' +
-      '<code>'+RT_SQL+'</code><br>' +
-      '执行后按 <b>Ctrl+Shift+R</b> 刷新即可。' +
-      '（在此之前，可用「设置界面」的「从云端拉取」手动同步。）' +
+      '<b>⚠️ 实时推送未生效（其它设备的改动约每 30 秒自动同步一次）</b><br>' +
+      '已启用定时轮询兜底，功能不受影响，只是不是“瞬时”。' +
+      '若需要真正的实时推送，请确认同域代理（/cbapi）支持 WebSocket 升级。' +
       (detail ? '<br><span style="opacity:.75">云端返回：'+esc(detail)+'</span>' : ''));
   }
   // 收到变更事件后防抖拉取；若本端正上传，稍后再拉，避免与 syncNow 打架
@@ -515,69 +510,65 @@
       pullCloud({ confirm:false, merge:true, quietError:true, silent:true });
     }, 600);
   }
+  // 轮询兜底：watch 12 秒未收到事件 / 出错时启用（约每 30 秒一次）
+  function startFallbackPoll(){
+    if(rtPollTimer) return;
+    rtPollTimer = setInterval(function(){
+      if(_aligning) return;
+      if(rtEventCount > 0) return;   // 已通过 watch 收到过事件 → 不需要轮询
+      pullCloud({ confirm:false, merge:true, quietError:true, silent:true });
+    }, 30000);
+  }
   function startRealtime(){
-    var c = getSb();
-    if(!c) return;
     if(state.settings.realtime === false){ stopRealtime(); rtState = "off"; updateRtBadge(); return; }
-    if(rtChannel) return;
-    rtState = "connecting"; updateRtBadge();
-    try{
-      rtChannel = c.channel("units-rt-" + Math.random().toString(36).slice(2,8))
-        .on("postgres_changes",
-            { event:"*", schema:"public", table: state.settings.supabaseTable },
-            function(){ rtEventCount++; rtLastEventAt = Date.now(); updateRtBadge(); scheduleRealtimePull(); })
-        .subscribe(function(status){
-          if(status === "SUBSCRIBED"){ rtState = "on"; }
-          else if(status === "CHANNEL_ERROR" || status === "TIMED_OUT"){ rtState = "error"; }
-          else if(status === "CLOSED"){ rtState = "off"; }
-          updateRtBadge();
-        });
-      // 监听服务端 system 消息：表未加入实时发布时，服务端会明确抱怨
-      // “Unable to subscribe to changes with given parameters … table: units”。
-      // 这是唯一能戳穿“订阅成功但收不到事件”的信号，必须捕获并提示。
+    if(rtWatcher) return;
+    ensureCb().then(function(db){
+      rtState = "connecting"; updateRtBadge();
+      var coll = db.collection(cbColl());
       try{
-        rtChannel.on("system", {}, function(msg){
-          var s = "";
-          try{ s = JSON.stringify(msg || {}); }catch(e){ s = String(msg); }
-          if(/Unable to subscribe to changes|check Realtime is enabled/i.test(s)){
-            rtState = "error"; updateRtBadge();
-            showRealtimeAlert("表未加入实时发布");
-          }
+        rtWatcher = coll.watch({
+          onChange: function(){
+            rtEventCount++; rtLastEventAt = Date.now(); rtState = "on"; updateRtBadge();
+            scheduleRealtimePull();
+          },
+          onError: function(e){ rtState = "error"; updateRtBadge(); startFallbackPoll(); }
         });
-      }catch(e){}
-    }catch(e){
-      rtState = "error"; updateRtBadge();
-    }
+      }catch(e){ rtState = "error"; updateRtBadge(); }
+      // watch 12 秒内未收到任何事件 → 启动轮询兜底（代理可能不支持 WebSocket）
+      setTimeout(function(){
+        if(rtEventCount === 0 && rtState !== "error" && !rtPollTimer) startFallbackPoll();
+      }, 12000);
+    }).catch(function(e){
+      rtState = "error"; updateRtBadge(); startFallbackPoll();
+    });
   }
   function stopRealtime(){
+    if(rtPollTimer){ clearInterval(rtPollTimer); rtPollTimer = null; }
     if(rtTimer){ clearTimeout(rtTimer); rtTimer = null; }
-    try{ if(rtChannel){ var c = getSb(); if(c) c.removeChannel(rtChannel); } }catch(e){}
-    rtChannel = null;
+    if(rtWatcher){ try{ rtWatcher.close(); }catch(e){} rtWatcher = null; }
   }
   // 从云端拉取。opts: { confirm:是否先确认覆盖, merge:按许可证号合并(保留本地独有记录、坐标不空覆盖),
   //                  quietError:静默错误提示, silent:静默全部提示 }
   async function pullCloud(opts){
     opts = opts || {};
-    var c = getSb();
-    if(!c){ if(!opts.silent) toast("请先在设置中配置 Supabase", "warn"); return; }
+    var db;
+    try{ db = await ensureCb(); }catch(e){ if(!opts.silent) toast("请先在设置中配置 CloudBase","warn"); return; }
     if(opts.confirm !== false && opts.merge !== true){
       if(!confirm("从云端拉取将用云端数据覆盖本地全部记录，确定继续？")) return;
     }
     try{
-      var res = await c.from(state.settings.supabaseTable).select("*");
-      if(res.error) throw res.error;
-      // 防御：过滤掉「检查云端连接 / 检查实时同步」留下的探针记录（正常情况下已即时删除）
-      var rows = (res.data || []).filter(function(d){ return !isProbeLicense(d.license); });
+      var coll = db.collection(cbColl());
+      var all = await fetchAll(coll);
+      // 过滤探针记录（正常已即时删除）
+      var rows = all.filter(function(d){ return !isProbeLicense(d.license); });
+      // 建立 license→_id 映射（供后续 upsert/delete 用）
+      state._cbId = {};
+      rows.forEach(function(d){ if(d && d.license) state._cbId[d.license] = d._id; });
       if(opts.merge === true){
-        // 合并模式：以 synced 标记为据，区分“本地新增”与“别处已删除”
         var cloudLicenses = {};
         rows.forEach(function(d){ cloudLicenses[d.license] = true; });
         // 仅删除“曾在云端(state.synced)、但云端现已没有”的本地记录 = 其它设备的删除已传播；
-        // 从未推上云端的本地新增（不在 synced）不会被误删，刷新后保留。
-        // 剪枝的安全条件：①云端有记录，或②本设备此前已确认过云端记录(synced 非空)。
-        // 两者都不满足时（RLS 屏蔽读取导致读到空、或首次运行）【绝不剪枝】，
-        // 否则会把本地已有数据全部误删（刷新即空）。
-        // 必须允许“云端被删空”的情况剪枝，否则其它设备删掉最后一条时本端不会跟着删。
+        // 从未推上云端的本地新增（不在 synced）不会被误删。云端被删空时也会剪枝。
         if(rows.length > 0 || Object.keys(state.synced).length > 0){
           state.data = state.data.filter(function(r){
             return !r.license || !state.synced[r.license] || cloudLicenses[r.license];
@@ -590,8 +581,6 @@
           if(base){
             base.id = d.id; base.name = d.name; base.address = d.address;
             base.validFrom = d.valid_from; base.validTo = d.valid_to;
-            // 仅当云端确实有该列（值非 undefined）时才覆盖本地，
-            // 否则云端缺列会把本地已有的备注/设备类型/联系人清空
             if(d.remark != null) base.remark = d.remark;
             if(d.device_type != null) base.deviceType = d.device_type;
             if(d.contact != null) base.contact = d.contact;
@@ -600,7 +589,7 @@
           } else {
             state.data.push({ _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
               validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat,
-              remark:(d.remark||""), deviceType:(d.device_type||""), contact:(d.contact||"") });
+              remark:(d.remark==null?"":d.remark), deviceType:(d.device_type==null?"":d.device_type), contact:(d.contact==null?"":d.contact) });
           }
           if(d.license) state.synced[d.license] = true;
         });
@@ -609,9 +598,8 @@
         state.data = rows.map(function(d){
           return { _uid: uid(), id:d.id, name:d.name, address:d.address, license:d.license,
             validFrom:d.valid_from, validTo:d.valid_to, lng:d.lng, lat:d.lat,
-            remark:(d.remark||""), deviceType:(d.device_type||""), contact:(d.contact||"") };
+            remark:(d.remark==null?"":d.remark), deviceType:(d.device_type==null?"":d.device_type), contact:(d.contact==null?"":d.contact) };
         });
-        // 全量覆盖分支：云端即为真相，每条云端记录都标记为已同步
         state.synced = {};
         rows.forEach(function(d){ if(d.license) state.synced[d.license] = true; });
         saveSynced();
@@ -619,21 +607,29 @@
       saveDataLocal();
       renderCurrentView();
       if(rows.length) toast("已从云端同步 "+rows.length+" 条"+(opts.merge?"（已与本地合并）":""), "ok");
-      // 云端空 + 本地也空 → 页面会“一条数据都没有”。若云端原本有数据，
-      // 最常见的原因就是 units 表被重新开启了 RLS（读返回 [] 而不是报错）。
       if(!rows.length && !state.data.length){
         showCloudAlert("warn",
           '<b>云端返回 0 条记录，本地也没有数据，所以页面是空的。</b><br>' +
-          '如果你确认云端原本存有数据，通常是 <b>units</b> 表被重新开启了 RLS（症状：读不到、也存不进）。' +
-          '可到「设置界面」点 <b>🔍 检查云端连接</b> 确认；或直接在 Supabase 的 SQL Editor 执行：<br>' +
-          '<code>'+RLS_SQL+'</code><br>' +
-          '执行后按 <b>Ctrl+Shift+R</b> 刷新即可。若你只是首次使用，可先在「单位台账」导入 Excel。');
+          '如果你确认云端原本存有数据，通常是集合 <b>'+esc(cbColl())+'</b> 的权限规则未放开读，' +
+          '或环境 ID 填错。请到 CloudBase 控制台确认集合权限为 <code>{"read":true,"write":true}</code>，' +
+          '然后按 <b>Ctrl+Shift+R</b> 刷新。若你只是首次使用，可先在「单位台账」导入 Excel。');
       }
     }catch(e){
       var m = e.message || String(e);
-      if(isRlsError(m)) showRlsAlert(m);
-      if(!opts.quietError && !opts.silent) toast("拉取失败：" + m, "err");
+      if(isPermissionErr(m)) showCloudError(m);
+      if(!opts.quietError && !opts.silent) toast("拉取失败："+m, "err");
     }
+  }
+
+  /* ---------------- 云端配置升级提示 ---------------- */
+  function showCfgUpgradeNotice(){
+    var env = String(state.settings.cbEnv || "");
+    showCloudAlert("warn",
+      '<b>ℹ️ 云端地址已自动更新</b><br>' +
+      '本设备保存的云端配置版本较旧（可能仍指向已停用的环境），已自动切换为当前内置环境：<br>' +
+      '<code>'+esc(env)+'</code><br>' +
+      '正在从新云端合并数据（只增不删，本地数据不会被清空）。' +
+      '若发现与其它设备数据不一致，请到「设置界面」点「从云端拉取」。');
   }
 
   /* ---------------- 高德地图 ---------------- */
@@ -1626,7 +1622,7 @@
         if(state.targetUid) updateSidePanel();
         // 容器尺寸可能随布局变化（如从 block 改为 flex 子项），主动重算地图尺寸，避免空白
         try { if(state.amap && state.amap.resize) state.amap.resize(); } catch(e){}
-        // 坐标已持久化（localStorage + Supabase），打开地图不再重新编码；
+        // 坐标已持久化（localStorage + CloudBase），打开地图不再重新编码；
         // 未编码的记录地图上没有点位，统一在右侧「待编码单位」里手动定位或自动编码。
         updateMapNote();
       } else {
@@ -1641,19 +1637,19 @@
   function fillSettings(){
     $("set-amap-key").value = state.settings.amapKey || "";
     $("set-amap-sec").value = state.settings.amapSecurity || "";
-    $("set-sb-url").value = state.settings.supabaseUrl || "";
-    $("set-sb-key").value = state.settings.supabaseKey || "";
-    $("set-sb-table").value = state.settings.supabaseTable || "units";
-    var rt = $("set-sb-realtime");
+    $("set-cb-env").value = state.settings.cbEnv || "";
+    $("set-cb-region").value = state.settings.cbRegion || "ap-shanghai";
+    $("set-cb-coll").value = state.settings.cbColl || "water-zyf";
+    $("set-cb-proxy").value = state.settings.cbProxy || "";
+    var rt = $("set-cb-realtime");
     if(rt) rt.value = (state.settings.realtime === false) ? "0" : "1";
-    // 当前实际连接的云端地址：多设备不一致时，一眼就能看出某台设备是不是连到了别的库
-    var cur = $("set-sb-current");
+    var cur = $("set-cb-current");
     if(cur){
-      var host = String(state.settings.supabaseUrl || "").replace(/^https?:\/\//, "").replace(/\/.*$/, "");
-      var isBuiltin = (state.settings.supabaseUrl === DEFAULT_SETTINGS.supabaseUrl);
-      cur.textContent = host
-        ? ("当前连接：" + host + " / " + (state.settings.supabaseTable || "units") +
-           (isBuiltin ? "（内置项目）" : "（⚠️ 非内置项目，与其它设备可能不一致）"))
+      var isBuiltin = (state.settings.cbEnv === DEFAULT_SETTINGS.cbEnv);
+      cur.textContent = state.settings.cbEnv
+        ? ("当前连接：环境 "+state.settings.cbEnv+" / 集合 "+(state.settings.cbColl||"water-zyf")+
+           (state.settings.cbProxy ? (" / 代理 "+state.settings.cbProxy) : " / 直连")+
+           (isBuiltin ? "（内置）" : "（⚠️ 非内置，与其它设备可能不一致）"))
         : "当前未配置云端";
       cur.className = "sb-current" + (isBuiltin ? "" : " warn");
     }
@@ -1662,34 +1658,35 @@
     var prevAmap = state.settings.amapKey + "|" + state.settings.amapSecurity;
     state.settings.amapKey = $("set-amap-key").value.trim();
     state.settings.amapSecurity = $("set-amap-sec").value.trim();
-    state.settings.supabaseUrl = $("set-sb-url").value.trim();
-    state.settings.supabaseKey = $("set-sb-key").value.trim();
-    state.settings.supabaseTable = $("set-sb-table").value.trim() || "units";
-    var rtEl = $("set-sb-realtime");
+    state.settings.cbEnv = $("set-cb-env").value.trim();
+    state.settings.cbRegion = $("set-cb-region").value.trim() || "ap-shanghai";
+    state.settings.cbColl = $("set-cb-coll").value.trim() || "water-zyf";
+    state.settings.cbProxy = $("set-cb-proxy").value.trim();
+    var rtEl = $("set-cb-realtime");
     var rtOn = rtEl ? (rtEl.value !== "0") : true;
     state.settings.realtime = rtOn;
     state.settings.cfgVer = CFG_VER;   // 用户手动保存 = 认可当前配置版本，不再被自动覆盖
     saveSettingsLocal();
-    // 实时开关/连接参数变化 → 重建订阅
+    resetCb();                 // 连接参数变化 → 丢弃旧客户端/缓存，按新环境重建
     stopRealtime(); rtState = "off";
     if(rtOn) startRealtime(); else updateRtBadge();
-    var nowAmap = state.settings.amapKey + "|" + state.settings.amapSecurity;
     $("set-status").textContent = "设置已保存。";
     toast("设置已保存", "ok");
     fillSettings();
+    var nowAmap = state.settings.amapKey + "|" + state.settings.amapSecurity;
     if(nowAmap !== prevAmap){
       toast("地图密钥已变更，即将重新加载以生效…");
       setTimeout(function(){ location.reload(); }, 900);
     }
   }
-  // 恢复内置云端配置：设备被旧项目锁死时的“一键回到正确库”
+  // 恢复内置云端配置：设备被旧环境锁死时的“一键回到正确环境”
   function restoreBuiltinCloud(){
-    if(!confirm("将把云端地址/密钥/表名恢复为内置配置：\n\n" + DEFAULT_SETTINGS.supabaseUrl +
-                "\n\n本设备当前未同步到云端的本地改动不会丢失。确定继续？")) return;
+    if(!confirm("将把 CloudBase 环境/集合/代理恢复为内置配置：\n\n环境 "+DEFAULT_SETTINGS.cbEnv+
+                "\n集合 "+DEFAULT_SETTINGS.cbColl+"\n\n本设备当前未同步到云端的本地改动不会丢失。确定继续？")) return;
     CFG_KEYS.forEach(function(k){ state.settings[k] = DEFAULT_SETTINGS[k]; });
     state.settings.cfgVer = CFG_VER;
     saveSettingsLocal();
-    sbClient = null;              // 丢弃旧客户端，按新地址重建
+    resetCb();
     stopRealtime(); rtState = "off";
     fillSettings();
     hideCloudAlert();
@@ -1699,122 +1696,70 @@
   }
 
   /* ---------------- 云端连接自检 ----------------
-   * 读一次 + 写一条探针（__probe__，随即删除）来区分三种状态：
-   * ① 可读可写 = 正常；② 写入被 42501 拒绝 = RLS 被开启（本项目头号故障）；
-   * ③ 其它网络/配置错误。探针记录即使残留也不会进入界面（pullCloud 已过滤）。
+   * 读一次 + 写一条探针（__probe__，随即删除）来区分：可读可写 = 正常；
+   * 写入被拒 = 集合安全规则未放开写权限（本项目头号故障）。
    */
   async function checkCloud(){
     var st = $("set-status");
-    var c = getSb();
-    if(!c){
-      if(st) st.textContent = "❌ " + sbUnavailableMsg();
-      toast(sbUnavailableMsg(), "warn");
-      return;
-    }
-    var table = state.settings.supabaseTable || "units";
-    if(st) st.textContent = "正在检查云端连接…";
     try{
-      var rd = await c.from(table).select("license").limit(5);
-      if(rd.error) throw rd.error;
-      var readN = (rd.data || []).length;
+      var db = await ensureCb();
+      if(!db){ if(st) st.textContent = "❌ "+cbUnavailableMsg(); toast(cbUnavailableMsg(), "warn"); return; }
+      var coll = db.collection(cbColl());
+      if(st) st.textContent = "正在检查云端连接…";
+      var c = unwrap(await coll.count(), "统计云端失败");
+      var readN = c.total || 0;
       var probe = "__probe__";
-      var wr = await c.from(table).upsert([{ license: probe, id:"0", name:"__probe__" }], { onConflict:"license" });
-      if(wr.error) throw wr.error;                            // RLS 拒绝会在 catch 里识别为 42501
-      await c.from(table).delete().in("license", [probe]);   // 清理探针
+      var r = mustAffect(unwrap(await coll.add({ license:probe, id:"0", name:"__probe__" }), "写入探针失败"), "写入探针失败");
+      var pid = r.id || null;
+      if(pid) unwrap(await coll.doc(pid).remove(), "删除探针失败");
       hideCloudAlert();
       if(st) st.textContent = "✅ 云端连接正常：可读可写" +
-        (readN ? "（读取到 " + readN + " 条样本）" : "，但云端当前没有任何记录（可点「上传到云端」把本地数据传上去）");
+        (readN ? ("（读取到 "+readN+" 条样本）") : "（云端当前为空，可点「上传到云端」把本地数据传上去）");
       toast("云端连接正常", "ok");
     }catch(e){
       var m = e.message || String(e);
-      if(isRlsError(m)){
-        showRlsAlert(m);
-        if(st) st.textContent = "❌ 云端写入被 RLS 拒绝（42501）：请按页面顶部提示执行 SQL 修复";
-      } else {
-        if(st) st.textContent = "❌ 云端连接失败：" + m;
-        toast("云端连接失败：" + m, "err");
-      }
+      if(isPermissionErr(m)) showCloudError(m);
+      if(st) st.textContent = "❌ 云端连接失败：" + m;
+      toast("云端连接失败："+m, "err");
     }
   }
 
   /* ---------------- 实时同步自检 ----------------
-   * 为什么需要它：Supabase 的订阅握手（phx_join）在“表未加入实时发布”时
-   * 依然返回 ok，前端会显示“已连接”，但事件永远不来 —— 属于典型的假成功。
-   * 本函数用「订阅 → 写探针 → 等事件 → 删探针」的方式做真实投递验证。
+   * 用「订阅 → 写探针 → 等事件 → 删探针」的方式做真实投递验证。
    */
   async function testRealtime(){
     var st = $("set-status");
-    var c = getSb();
-    if(!c){
-      if(st) st.textContent = "❌ " + sbUnavailableMsg();
-      toast(sbUnavailableMsg(), "warn");
-      return;
-    }
-    var table = state.settings.supabaseTable || "units";
-    if(st) st.textContent = "正在检查实时同步（写入探针并等待推送，最多 12 秒）…";
-    var probe = "__rt_probe__";
-    var got = false, joined = false, sysMsg = "";
-    var ch = null;
     try{
-      await new Promise(function(resolve){
-        var done = false;
-        var finish = function(){ if(!done){ done = true; resolve(); } };
-        ch = c.channel("rt-test-" + Math.random().toString(36).slice(2,8))
-          .on("postgres_changes", { event:"*", schema:"public", table: table },
-              function(){ got = true; finish(); })
-          .subscribe(function(status){ if(status === "SUBSCRIBED"){ joined = true; finish(); } });
-        try{
-          ch.on("system", {}, function(msg){
-            var s = "";
-            try{ s = JSON.stringify(msg || {}); }catch(e){ s = String(msg); }
-            if(/Unable to subscribe to changes|check Realtime is enabled/i.test(s)){
-              sysMsg = "表未加入实时发布";
-              finish();
-            }
-          });
-        }catch(e){}
-        setTimeout(finish, 8000);   // 握手超时
+      var db = await ensureCb();
+      if(!db){ if(st) st.textContent = "❌ "+cbUnavailableMsg(); toast(cbUnavailableMsg(), "warn"); return; }
+      var coll = db.collection(cbColl());
+      if(st) st.textContent = "正在检查实时同步（订阅并写入探针，最多 12 秒）…";
+      var got = false, watcher = null;
+      watcher = coll.watch({
+        onChange:function(){ got = true; if(watcher) try{ watcher.close(); }catch(e){} },
+        onError:function(e){ /* 走轮询兜底 */ }
       });
-
-      if(!joined && !sysMsg){
-        throw new Error("订阅未成功（网络或密钥问题）");
-      }
-      if(sysMsg){
-        showRealtimeAlert(sysMsg);
-        if(st) st.textContent = "❌ 实时同步未生效：units 表未加入实时发布。请在 Supabase SQL Editor 执行：" + RT_SQL;
-        if(ch) c.removeChannel(ch);
-        return;
-      }
-
-      // 握手成功 → 真正测一次投递
-      if(st) st.textContent = "订阅成功，正在写入探针并等待推送…";
-      await c.from(table).upsert([{ license: probe, id:"0", name:"__rt_probe__" }], { onConflict:"license" });
+      await sleep(1500);
+      var probe = "__rt_probe__";
+      var w = mustAffect(unwrap(await coll.add({ license:probe, id:"0", name:"__rt_probe__" }), "写入探针失败"), "写入探针失败");
       var waited = 0;
-      while(!got && waited < 10000){
-        await new Promise(function(r){ setTimeout(r, 400); });
-        waited += 400;
-      }
-      await c.from(table).delete().in("license", [probe]);   // 清理探针
-      if(ch) c.removeChannel(ch);
-
+      while(!got && waited < 10000){ await sleep(400); waited += 400; }
+      if(w.id){ try{ await coll.doc(w.id).remove(); }catch(e){} }
+      if(watcher){ try{ watcher.close(); }catch(e){} }
       if(got){
-        rtEventCount++; rtLastEventAt = Date.now();
-        if(rtState !== "on"){ rtState = "on"; }
-        updateRtBadge();
-        hideCloudAlert();
+        rtEventCount++; rtLastEventAt = Date.now(); rtState = "on"; updateRtBadge(); hideCloudAlert();
         if(st) st.textContent = "✅ 实时同步正常：已实测收到云端变更推送";
         toast("实时同步正常", "ok");
       } else {
         rtState = "error"; updateRtBadge();
-        showRealtimeAlert("订阅成功但 10 秒内未收到推送");
-        if(st) st.textContent = "❌ 订阅成功但收不到事件：units 表未加入实时发布。请执行：" + RT_SQL;
+        showRealtimeAlert("订阅成功但 12 秒内未收到推送（已启用轮询兜底）");
+        if(st) st.textContent = "⚠️ 实时推送未收到，已启用每 30 秒轮询兜底；如需真正实时推送，请确认代理支持 WebSocket。";
       }
     }catch(e){
       var m = e.message || String(e);
-      try{ if(ch) c.removeChannel(ch); }catch(e2){}
-      // 探针清理失败不阻塞；pullCloud 已过滤 __rt_probe__ 前缀
-      if(isRlsError(m)){ showRlsAlert(m); if(st) st.textContent = "❌ 写入被 RLS 拒绝：" + m; }
-      else { if(st) st.textContent = "❌ 实时同步检查失败：" + m; toast("实时同步检查失败：" + m, "err"); }
+      if(isPermissionErr(m)) showCloudError(m);
+      if(st) st.textContent = "❌ 实时同步检查失败：" + m;
+      toast("实时同步检查失败："+m, "err");
     }
   }
 
@@ -1972,17 +1917,19 @@
     });
 
     // 第三方库加载（多 CDN 回退）
-    // 背景：原来只从 cdn.jsdelivr.net 单源加载，且没写 onerror。国内网络下
-    // jsdelivr 时常被拦截 → 脚本静默失败 → 自动拉取和实时同步全都不执行，
-    // 而界面毫无提示（甚至误报成“请先在设置中配置 Supabase”）。
+    // 背景：原来只从单源加载且没写 onerror，国内网络下常被拦截 → 脚本静默失败 →
+    // 自动拉取和实时同步全都不执行，而界面毫无提示。现已改为多 CDN 回退 + 明确告警。
     var autoPulled = false;
-    loadScriptWithFallback(SUPABASE_CDNS, function(){ return !!window.supabase; }, "Supabase 同步库")
-      .then(function(okUrl){
+    loadScriptWithFallback(CB_SDK_URLS, function(){ return !!window.cloudbase; }, "CloudBase 同步库")
+      .then(async function(okUrl){
         if(!okUrl) return;
-        if(!autoPulled && state.settings.supabaseUrl && state.settings.supabaseKey){
+        if(!autoPulled && state.settings.cbEnv){
           autoPulled = true;
-          pullCloud({ confirm:false, merge:true, quietError:true });
-          startRealtime();          // 开启实时通道：其它设备改动后本页自动更新
+          try{
+            await ensureCb();
+            pullCloud({ confirm:false, merge:true, quietError:true });
+            startRealtime();          // 开启实时通道：其它设备改动后本页自动更新
+          }catch(e){ toast("云端初始化失败："+(e.message||e), "err"); }
         }
       });
     loadScriptWithFallback(XLSX_CDNS, function(){ return !!window.XLSX; }, "Excel 解析库")
@@ -2030,7 +1977,7 @@
   // 调试/自检钩子（无头回归测试也依赖这些入口）
   window.__wb = {
     closeModal: closeModal, openDetail: openDetail, enterPickMode: enterPickMode, exitPickMode: exitPickMode,
-    state: state, getSb: getSb, syncNow: syncNow, pullCloud: pullCloud, pushCloud: pushCloud,
+    state: state, ensureCb: ensureCb, syncNow: syncNow, pullCloud: pullCloud, pushCloud: pushCloud,
     checkCloud: checkCloud, testRealtime: testRealtime, restoreBuiltinCloud: restoreBuiltinCloud,
     switchView: switchView, DEFAULT_SETTINGS: DEFAULT_SETTINGS, CFG_VER: CFG_VER
   };
@@ -2044,6 +1991,7 @@
   });
   function init(){
     loadSettings();
+    installCbProxy();     // 同域代理：把 CloudBase 网关请求改写到 /cbapi（免安全域名白名单）
     loadData();
     bind();
     updateStat();

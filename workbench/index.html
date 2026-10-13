@@ -37,7 +37,7 @@
   .rt-badge.connecting::before{background:#f5a524;animation:rtpulse 1s infinite}
   .rt-badge.error{color:#c0392b;border-color:#f3cfc9;background:#fdf4f2}
   .rt-badge.error::before{background:#e5484d}
-  /* 当前连接的云端地址：多设备不一致时一眼看出是否连错库 */
+  /* 当前连接的云端环境：多设备不一致时一眼看出是否连错环境 */
   .sb-current{margin:10px 0 2px;font-size:12px;color:#4a5262;background:#f6f7f9;
     border:1px solid #e6e9ef;border-radius:8px;padding:8px 10px;word-break:break-all}
   .sb-current.warn{color:#8a5a00;background:#fff8e6;border-color:#f3d99b}
@@ -197,7 +197,7 @@
   .toast.show{opacity:1;transform:none}
   .toast.ok{background:#15803d}.toast.warn{background:#b45309}.toast.err{background:#b91c1c}
   .sec-title{font-size:13px;font-weight:700;color:var(--muted);margin:18px 0 10px}
-  /* 云端异常提示条（如 Supabase 的 units 表被重新开启 RLS：读不到、也存不进） */
+  /* 云端异常提示条（如 CloudBase 集合安全规则未放开、集合不存在、被 CORS 预检拦截） */
   .cloud-alert{max-width:1600px;margin:14px auto -8px;padding:13px 16px;border-radius:12px;
     background:#fdf4f2;border:1px solid #f3cfc9;color:#8c2f24;font-size:13px;line-height:1.7;
     display:flex;gap:14px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
@@ -444,28 +444,32 @@
     </div>
 
     <div class="card" style="margin-top:16px">
-      <div class="hd"><h2>Supabase 云同步配置</h2></div>
+      <div class="hd"><h2>CloudBase 云同步配置</h2></div>
       <div class="bd">
         <div class="setrow">
-          <div><div class="lbl">项目 URL</div><div class="desc">Supabase 项目地址</div></div>
-          <input type="text" id="set-sb-url" placeholder="https://xxxx.supabase.co">
+          <div><div class="lbl">环境 ID</div><div class="desc">CloudBase 环境 ID（形如 xxxx-1a2b3c4d）</div></div>
+          <input type="text" id="set-cb-env" placeholder="water309-d8g1c3uy074511212">
         </div>
         <div class="setrow">
-          <div><div class="lbl">Anon Key</div><div class="desc">公开匿名密钥（含写权限）</div></div>
-          <input type="text" id="set-sb-key" placeholder="eyJhbGci...">
+          <div><div class="lbl">地域</div><div class="desc">必须与环境一致（如 ap-shanghai）</div></div>
+          <input type="text" id="set-cb-region" placeholder="ap-shanghai">
         </div>
         <div class="setrow">
-          <div><div class="lbl">数据表名</div><div class="desc">存储单位的表，需含字段 license(主键) / id / name / address / valid_from / valid_to / lng / lat</div></div>
-          <input type="text" id="set-sb-table" placeholder="units">
+          <div><div class="lbl">集合名</div><div class="desc">文档型数据库中的集合，需含字段 license / id / name / address / valid_from / valid_to / lng / lat / remark / device_type / contact</div></div>
+          <input type="text" id="set-cb-coll" placeholder="water-zyf">
         </div>
         <div class="setrow">
-          <div><div class="lbl">多设备实时同步</div><div class="desc">其它设备增删改后，本页面自动即时更新（无需手动刷新）。需在 Supabase 执行一次 <code>alter publication supabase_realtime add table units;</code></div></div>
-          <select id="set-sb-realtime">
+          <div><div class="lbl">同域代理前缀</div><div class="desc">默认 /cbapi（由部署平台转发到 CloudBase 网关，用于绕过免费版无法配置安全域名导致的跨域）。留空则直连</div></div>
+          <input type="text" id="set-cb-proxy" placeholder="/cbapi">
+        </div>
+        <div class="setrow">
+          <div><div class="lbl">多设备实时同步</div><div class="desc">其它设备增删改后自动更新：优先 watch 实时推送；代理不支持 WebSocket 时自动改为每 30 秒轮询兜底</div></div>
+          <select id="set-cb-realtime">
             <option value="1">开启</option>
             <option value="0">关闭</option>
           </select>
         </div>
-        <p class="sb-current" id="set-sb-current"></p>
+        <p class="sb-current" id="set-cb-current"></p>
         <div class="actions">
           <button class="btn" id="sb-check">🔍 检查云端连接</button>
           <button class="btn" id="sb-rt-check">📡 检查实时同步</button>
@@ -482,7 +486,7 @@
 
 <div id="toast-wrap"></div>
 
-<script src="seed.js?v=20261009a"></script>
-<script src="app.js?v=20261009a"></script>
+<script src="seed.js?v=20261013a"></script>
+<script src="app.js?v=20261013a"></script>
 </body>
 </html>

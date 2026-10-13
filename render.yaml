@@ -11,3 +11,11 @@ services:
     pullRequestPreviewsEnabled: false
     # 默认会分配 *.onrender.com 的公网 HTTPS 域名，电脑/手机均可直接访问。
     # 如需自定义域名，可在 Render 控制台绑定。
+    # 同域代理：把 CloudBase 网关请求(同源的 /cbapi/*)转发到腾讯云，避开免费版
+    # CloudBase 无法配置安全域名导致的浏览器跨域预检失败。app.js 的 installCbProxy()
+    # 会把 https://<环境>.<地域>.tcb-api.tencentcloudapi.com/* 改写成 /cbapi/*。
+    # ⚠️ 若换 CloudBase 环境/地域，这里的目标地址也要同步改。
+    routes:
+      - type: rewrite
+        source: /cbapi/*
+        destination: https://water309-d8g1c3uy074511212.ap-shanghai.tcb-api.tencentcloudapi.com/*
