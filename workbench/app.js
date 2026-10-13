@@ -373,36 +373,77 @@
     if(isPermissionErr(msg)) showCloudError(msg);
     toast("云端保存失败（数据仅存本地）："+msg, "err");
   }
+  /* ---------------- 全量云操作互斥门（性能护栏，别删） ----------------
+   * 一次全量操作会发起上百次 /cbapi 请求。经同域代理单次往返实测约 500ms，
+   * 且 SDK 内部把请求串行化（实测 10 条并发写 8298ms vs 逐条 4980ms，并发无收益）。
+   * 所以「少发请求」是唯一的有效手段；叠加执行更是灾难：
+   * 旧版 pushCloud 对 191 行逐条 update、每条 updated:0 还要再读回一次（382 次请求），
+   * 实测耗时 313 秒，期间整页完全失去响应（CDP Runtime.evaluate 连续 6 次 5 秒无响应）。
+   * 这里保证同一时刻只有一个全量操作在跑，后来的合并成“跑完再补一次”。
+   */
+  var _cloudGate = null;      // null | "push" | "align" | "pull"
+  var _cloudPending = null;   // null | "align" | "pull"
+  function cloudGateFree(){
+    _cloudGate = null;
+    var p = _cloudPending; _cloudPending = null;
+    if(!p) return;
+    setTimeout(function(){
+      if(p === "align") syncNow({silent:true});
+      else pullCloud({confirm:false, merge:true, quietError:true, silent:true});
+    }, 0);
+  }
   async function pushCloud(silent){
-    var db;
-    try{ db = await ensureCb(); }catch(e){ if(!silent) toast(cbUnavailableMsg(),"warn"); return; }
+    if(_cloudGate){
+      if(!silent) toast("云端同步正在进行，请稍候再试", "warn");
+      return;
+    }
+    _cloudGate = "push";
     try{
+      var db;
+      try{ db = await ensureCb(); }catch(e){ if(!silent) toast(cbUnavailableMsg(),"warn"); return; }
       var coll = db.collection(cbColl());
+      // 先读云端全量：既拿到 license→_id 映射，也比对出「无需变更」的行。
+      // ⚠️ 这一步是性能关键：跳过未变更行后，日常上传从 382 次请求降到 2 次。
+      var all = await fetchAll(coll);
+      var cloudById = {}, cloudDoc = {};
+      all.forEach(function(d){ if(d && d.license){ cloudById[d.license] = d._id; cloudDoc[d.license] = d; } });
+      state._cbId = Object.assign({}, state._cbId, cloudById);
       var rows = toRows();
-      for(var i=0;i<rows.length;i++){
-        var row = rows[i];
-        var id = state._cbId[row.license];
-        if(id){
-          var u = unwrap(await coll.doc(id).update(row), "更新云端失败 license="+row.license);
+      var todo = [];
+      rows.forEach(function(row){
+        if(!row.license) return;                     // 无许可证号无法定位文档，跳过（否则每次都会重复新增）
+        var id = cloudById[row.license];
+        if(!id){ todo.push({ row:row, add:true }); return; }
+        if(sameRow(row, cloudDoc[row.license])) return;   // 与云端一致 → 不发请求
+        todo.push({ row:row, id:id });
+      });
+      for(var i=0;i<todo.length;i++){
+        var it = todo[i];
+        if(it.add){
+          var r = mustAffect(unwrap(await coll.add(it.row), "写入云端失败 license="+it.row.license), "写入云端失败");
+          if(r.id) state._cbId[it.row.license] = r.id;
+        } else {
+          var u = unwrap(await coll.doc(it.id).update(it.row), "更新云端失败 license="+it.row.license);
           if(u && typeof u.updated === "number" && u.updated === 0){
             // updated:0 = 匹配到文档但内容没变（无需变更）时也会出现，不能当成“无权限”。
             // 读回该条与本地比对：一致=成功；不一致=真的没生效（无权限/已被删）→ 报错。
-            var chk = unwrap(await coll.doc(id).get(), "读取云端失败");
+            var chk = unwrap(await coll.doc(it.id).get(), "读取云端失败");
             var d = (chk && chk.data) ? (Array.isArray(chk.data) ? chk.data[0] : chk.data) : null;
-            if(!d || !sameRow(row, d)) throw new Error("更新云端失败 license="+row.license+"：云端未生效（无权限或已被删除），请检查集合安全规则");
+            if(!d || !sameRow(it.row, d)) throw new Error("更新云端失败 license="+it.row.license+"：云端未生效（无权限或已被删除），请检查集合安全规则");
           }
-        } else {
-          var r = mustAffect(unwrap(await coll.add(row), "写入云端失败 license="+row.license), "写入云端失败");
-          if(r.id) state._cbId[row.license] = r.id;
         }
       }
       markAllSynced();
-      if(!silent) toast("已上传 "+rows.length+" 条到云端", "ok");
+      if(!silent) toast(todo.length
+        ? ("已上传 "+rows.length+" 条到云端（其中 "+todo.length+" 条有变更）")
+        : ("云端已是最新（"+rows.length+" 条，无需上传）"), "ok");
     }catch(e){
       var m = e.message || String(e);
       if(isPermissionErr(m)) showCloudError(m);
       if(!silent) toast("上传失败："+m, "err");
       else warnSyncError(m);
+    }finally{
+      cloudGateFree();
     }
   }
   async function deleteCloud(licenses, silent){
@@ -427,7 +468,10 @@
   var syncTimer = null;
   function scheduleSync(){
     if(syncTimer) clearTimeout(syncTimer);
-    syncTimer = setTimeout(function(){ pushCloud(true); }, 1500);
+    // 用 syncNow（先比对、跳过未变更行）而不是 pushCloud：
+    // 导入/编码结束时这里会被触发，旧版走 pushCloud 会逐条重传全部记录，
+    // 实测 191 条耗时 313 秒并卡死整页。syncNow 在无变化时只需 2 次请求。
+    syncTimer = setTimeout(function(){ syncTimer = null; syncNow({silent:true}); }, 1500);
   }
 
   /* ---------------- 即时全量对齐（台账操作后调用） ----------------
@@ -437,11 +481,11 @@
   var _aligning = false, _alignPending = false;
   async function syncNow(opts){
     opts = opts || {};
-    if(_aligning){ _alignPending = true; return; }
-    var db;
-    try{ db = await ensureCb(); }catch(e){ if(!opts.silent) toast("请先在设置中配置 CloudBase","warn"); return; }
-    _aligning = true;
+    if(_aligning || (_cloudGate && _cloudGate !== "align")){ _alignPending = true; return; }
+    _aligning = true; _cloudGate = "align";
     try{
+      var db;
+      try{ db = await ensureCb(); }catch(e){ if(!opts.silent) toast("请先在设置中配置 CloudBase","warn"); return; }
       var coll = db.collection(cbColl());
       // 1) 读取云端全量，建立 license→_id / license→文档 映射（供后续 upsert/delete 用）
       var all = await fetchAll(coll);
@@ -450,9 +494,11 @@
       state._cbId = cloudById;
       // 2) 上传本地全部记录：与云端一致的直接跳过（否则 doc().update() 对未变更文档返回
       //    updated:0，会被误判为“无权限”而中断整批同步）；确有变化的才发送更新。
+      //    注意：这里刻意保持【逐条串行】——实测经 /cbapi 代理并发写反而更慢（见互斥门注释）。
       var rows = toRows();
       for(var i=0;i<rows.length;i++){
         var row = rows[i];
+        if(!row.license) continue;                 // 无许可证号无法定位文档，跳过（避免重复新增）
         var id = cloudById[row.license];
         if(id){
           if(cloudDoc[row.license] && sameRow(row, cloudDoc[row.license])) continue;
@@ -496,6 +542,7 @@
       else warnSyncError(m);
     }finally{
       _aligning = false;
+      cloudGateFree();
       if(_alignPending){ _alignPending = false; syncNow(opts); }
     }
   }
@@ -574,16 +621,40 @@
     if(rtTimer){ clearTimeout(rtTimer); rtTimer = null; }
     if(rtWatcher){ try{ rtWatcher.close(); }catch(e){} rtWatcher = null; }
   }
+  /* 数据指纹：用于判断一次拉取是否真的改变了要渲染的内容。
+   * 实时推送/轮询会频繁触发 pullCloud，若无变化还整页重绘（地图视图还会重建
+   * 上百个标记），就会出现“什么都没变却在卡”的怪象。 */
+  function dataSig(){
+    var h = 0, s;
+    for(var i=0;i<state.data.length;i++){
+      var r = state.data[i];
+      s = r._uid + "|" + r.id + "|" + r.name + "|" + r.address + "|" + r.license + "|" +
+          r.validFrom + "|" + r.validTo + "|" + r.lng + "|" + r.lat + "|" +
+          r.remark + "|" + r.deviceType + "|" + r.contact;
+      for(var j=0;j<s.length;j++){ h = (h * 31 + s.charCodeAt(j)) | 0; }
+    }
+    return state.data.length + ":" + h;
+  }
+  /* 渲染合并：同一帧内多次请求只重绘一次（同步/拉取/实时推送都会调它） */
+  var _renderQueued = false;
+  function renderCurrentViewSoon(){
+    if(_renderQueued) return;
+    _renderQueued = true;
+    setTimeout(function(){ _renderQueued = false; switchView(state.view); }, 0);
+  }
   // 从云端拉取。opts: { confirm:是否先确认覆盖, merge:按许可证号合并(保留本地独有记录、坐标不空覆盖),
   //                  quietError:静默错误提示, silent:静默全部提示 }
   async function pullCloud(opts){
     opts = opts || {};
-    var db;
-    try{ db = await ensureCb(); }catch(e){ if(!opts.silent) toast("请先在设置中配置 CloudBase","warn"); return; }
+    if(_cloudGate){ _cloudPending = _cloudPending || "pull"; return false; }
     if(opts.confirm !== false && opts.merge !== true){
-      if(!confirm("从云端拉取将用云端数据覆盖本地全部记录，确定继续？")) return;
+      if(!confirm("从云端拉取将用云端数据覆盖本地全部记录，确定继续？")) return false;
     }
+    _cloudGate = "pull";
     try{
+      var db;
+      try{ db = await ensureCb(); }catch(e){ if(!opts.silent) toast("请先在设置中配置 CloudBase","warn"); return false; }
+      var sig0 = dataSig();
       var coll = db.collection(cbColl());
       var all = await fetchAll(coll);
       // 过滤探针记录（正常已即时删除）
@@ -632,8 +703,9 @@
         saveSynced();
       }
       saveDataLocal();
-      renderCurrentView();
-      if(rows.length) toast("已从云端同步 "+rows.length+" 条"+(opts.merge?"（已与本地合并）":""), "ok");
+      // 只有内容真的变了才重绘；无变化时跳过（避免同步过程中反复重建地图标记）
+      if(dataSig() !== sig0) renderCurrentViewSoon();
+      if(rows.length && !opts.silent) toast("已从云端同步 "+rows.length+" 条"+(opts.merge?"（已与本地合并）":""), "ok");
       if(!rows.length && !state.data.length){
         showCloudAlert("warn",
           '<b>云端返回 0 条记录，本地也没有数据，所以页面是空的。</b><br>' +
@@ -641,10 +713,14 @@
           '或环境 ID 填错。请到 CloudBase 控制台确认集合权限为 <code>{"read":true,"write":true}</code>，' +
           '然后按 <b>Ctrl+Shift+R</b> 刷新。若你只是首次使用，可先在「单位台账」导入 Excel。');
       }
+      return true;
     }catch(e){
       var m = e.message || String(e);
       if(isPermissionErr(m)) showCloudError(m);
       if(!opts.quietError && !opts.silent) toast("拉取失败："+m, "err");
+      return false;
+    }finally{
+      cloudGateFree();
     }
   }
 
@@ -731,52 +807,94 @@
     cancelPendingTargetClick();     // 双击不切换目标，只弹详情
     openDetail(uid);
   }
+  /* ---------------- 地图标记：增量更新（性能护栏，别改回“全量重建”） ----------------
+   * 旧实现每次都把全部标记 setMap(null) 再 new 一遍。191 个点位重建一次实测
+   * 产生 1457ms 的长任务，而 placeMarkers 会被同步、编码进度、切换视图、拉取
+   * 反复调用 → 页面持续卡顿。现在只做三件事：删掉消失的、新建新增的、
+   * 其余就地改坐标/内容（不重建 DOM，也不重新绑定事件）。
+   * _mkCls 记录每个标记当前写入的 class，避免无谓的 setContent。
+   */
+  var _mkCls = {};
+  function markerCls(rec){
+    var cls = "mk-dot";
+    if(rec._uid === state.targetUid) cls += " target";
+    if(state.searchActive){
+      if(state.searchMatches[rec._uid]){
+        cls += " hl";
+        if(state.searchJustRan) cls += " bounce";
+      } else if(rec._uid !== state.targetUid) cls += " dim";
+    }
+    return cls;
+  }
+  function markerContent(rec, cls){
+    return '<div class="'+cls+'" title="'+esc(rec.name)+'" data-uid="'+rec._uid+'"></div>';
+  }
+  // 事件只绑定一次；用闭包里的 uid（记录对象可能被云端拉取替换）
+  function bindMarker(marker, uid){
+    marker.on("click", function(){
+      if(state.pickMode){ pickMarkerChosen(uid); return; }
+      state._markerClickTs = Date.now();            // 立即记录，供空白地图点击防抖
+      var now = Date.now();
+      if(state._lastClickUid === uid && (now - state._lastClickTs) < 350){
+        state._lastClickUid = uid; state._lastClickTs = now;
+        openDetailFromMap(uid);   // 双击同一标记：弹详情，且不改变当前目标
+        return;
+      }
+      state._lastClickUid = uid; state._lastClickTs = now;
+      if(state._clickTimer) clearTimeout(state._clickTimer);
+      state._clickTimer = setTimeout(function(){
+        state._clickTimer = null;
+        selectTarget(uid);        // 单击：设为目标（红色+闪烁+面板+距离圆）
+      }, 260);
+    });
+    // 兜底②：高德 SDK 原生 dblclick（部分版本会代理该事件）
+    marker.on("dblclick", function(){
+      if(state.pickMode) return;
+      openDetailFromMap(uid);
+    });
+  }
   function placeMarkers(){
     if(!state.amap) return;
-    Object.keys(state.markers).forEach(function(k){ state.markers[k].setMap(null); });
-    state.markers = {};
-    state.data.forEach(function(rec){
-      if(rec.lng==null || rec.lat==null) return;
-      // 圆形标记；搜索高亮/跳动直接写入内容 class，保证稳定生效
-      var cls = "mk-dot";
-      if(rec._uid === state.targetUid) cls += " target";
-      if(state.searchActive){
-        if(state.searchMatches[rec._uid]){
-          cls += " hl";
-          if(state.searchJustRan) cls += " bounce";
-        } else if(rec._uid !== state.targetUid) cls += " dim";
+    var want = {};
+    for(var i=0;i<state.data.length;i++){
+      var rec = state.data[i];
+      if(rec.lng==null || rec.lat==null) continue;
+      want[rec._uid] = rec;
+    }
+    // 1) 删除已消失的点位
+    Object.keys(state.markers).forEach(function(k){
+      if(want[k]) return;
+      try{ state.markers[k].setMap(null); }catch(e){}
+      delete state.markers[k]; delete _mkCls[k];
+    });
+    // 2) 新增 / 就地更新
+    Object.keys(want).forEach(function(k){
+      var rec = want[k];
+      var cls = markerCls(rec);
+      var m = state.markers[k];
+      if(!m){
+        m = new window.AMap.Marker({
+          position:[rec.lng, rec.lat],
+          anchor:"center",
+          title:rec.name,
+          zIndex:10,
+          content:markerContent(rec, cls),
+          extData:{ uid:rec._uid }
+        });
+        bindMarker(m, rec._uid);
+        m.setMap(state.amap);
+        state.markers[k] = m; _mkCls[k] = cls;
+        return;
       }
-      var marker = new window.AMap.Marker({
-        position:[rec.lng, rec.lat],
-        anchor:"center",
-        title:rec.name,
-        zIndex:10,
-        content:'<div class="'+cls+'" title="'+esc(rec.name)+'" data-uid="'+rec._uid+'"></div>',
-        extData:{ uid:rec._uid }
-      });
-      marker.on("click", function(){
-        if(state.pickMode){ pickMarkerChosen(rec._uid); return; }
-        state._markerClickTs = Date.now();            // 立即记录，供空白地图点击防抖
-        var now = Date.now();
-        if(state._lastClickUid === rec._uid && (now - state._lastClickTs) < 350){
-          state._lastClickUid = rec._uid; state._lastClickTs = now;
-          openDetailFromMap(rec._uid);   // 双击同一标记：弹详情，且不改变当前目标
-          return;
-        }
-        state._lastClickUid = rec._uid; state._lastClickTs = now;
-        if(state._clickTimer) clearTimeout(state._clickTimer);
-        state._clickTimer = setTimeout(function(){
-          state._clickTimer = null;
-          selectTarget(rec._uid);        // 单击：设为目标（红色+闪烁+面板+距离圆）
-        }, 260);
-      });
-      // 兜底②：高德 SDK 原生 dblclick（部分版本会代理该事件）
-      marker.on("dblclick", function(){
-        if(state.pickMode) return;
-        openDetailFromMap(rec._uid);
-      });
-      marker.setMap(state.amap);
-      state.markers[rec._uid] = marker;
+      try{
+        var pos = m.getPosition();
+        if(!pos || pos.lng !== rec.lng || pos.lat !== rec.lat) m.setPosition([rec.lng, rec.lat]);
+      }catch(e){}
+      try{ if(m.getTitle && m.getTitle() !== rec.name) m.setTitle(rec.name); }catch(e){}
+      if(_mkCls[k] !== cls){
+        try{ m.setContent(markerContent(rec, cls)); }catch(e){}
+        _mkCls[k] = cls;
+      }
     });
     state.searchJustRan = false;   // 本次搜索的跳动只播放一次
     updateMapCount();
